@@ -17,38 +17,6 @@ This platform processes historical job postings to help job seekers understand:
 
 **Key Innovation:** LLM-powered job title normalization that learns from actual data patterns, and multi-threading process using Apache Spark.
 
-## How To Start Project
-
-1. Start Spark containers
-
-```bash
-docker compose up -d
-```
-
-2. Access the Spark master container
-
-```bash
-docker exec -it spark-master bash
-```
-
-3. Run python scripts for each processing step
-
-```bash
-/opt/spark/bin/spark-submit /opt/spark/notebooks/<python-file>
-```
-
-- Example for Step 1:
-
-```bash
-/opt/spark/bin/spark-submit /opt/spark/notebooks/step1_select_colums.py
-```
-
-4. Convert parquet files into csv (optional)
-
-```bash
-/opt/spark/bin/spark-submit /opt/spark/notebooks/parquet_to_csv.py --input /opt/spark/data/processed/step1_selected --output /opt/spark/data/processed/step1_selected/preview_csv_small
-```
-
 ## 🎯 Core Features
 
 ### Rule-Based Data Pre-Processing
