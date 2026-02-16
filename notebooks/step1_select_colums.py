@@ -4,10 +4,10 @@ Step 1: Select Required Columns with Flexible Column Matching
 Automatically finds and standardizes columns:
 - ID columns (job_id, posting_id, id, etc.) → 'id'
 - Title columns (title, job_title, position, etc.) → 'title'
-- Description columns (description, desc, job_description, etc.) → 'description'
+# - Description columns (description, desc, job_description, etc.) → 'description' [COMMENTED OUT - uncomment if needed]
 
 Input: Raw CSV
-Output: Parquet with standardized columns [id, title, description]
+Output: Parquet with standardized columns [id, title]  # description removed to reduce file size
 """
 
 from pyspark.sql import SparkSession, DataFrame
@@ -60,10 +60,10 @@ def detect_columns(df: DataFrame) -> Dict[str, str]:
     if title_col:
         mapping['title'] = title_col
     
-    # Find Description column
-    desc_col = find_column(columns, ['description', 'desc'])
-    if desc_col:
-        mapping['description'] = desc_col
+    # Find Description column [COMMENTED OUT - uncomment if needed]
+    # desc_col = find_column(columns, ['description', 'desc'])
+    # if desc_col:
+    #     mapping['description'] = desc_col
     
     return mapping
 
@@ -78,7 +78,7 @@ def run_step1(spark: SparkSession, input_path: str, output_path: str) -> DataFra
         output_path: Output Parquet path
         
     Returns:
-        Processed DataFrame with columns [id, title, description]
+        Processed DataFrame with columns [id, title]  # description excluded
     """
     print(f"\n{'='*80}")
     print("STEP 1: Column Selection & Standardization")
@@ -87,7 +87,7 @@ def run_step1(spark: SparkSession, input_path: str, output_path: str) -> DataFra
     # 1. Load data (read all columns as String to avoid type inference issues)
     print(f"\n[1/4] Reading from: {input_path}")
     df = (
-    spark.read
+        spark.read
         .option("header", True)
         .option("inferSchema", False)
         .option("multiLine", True)
@@ -106,7 +106,8 @@ def run_step1(spark: SparkSession, input_path: str, output_path: str) -> DataFra
     column_mapping = detect_columns(df)
     
     # Check for missing required columns
-    required = ['id', 'title', 'description']
+    required = ['id', 'title']  # description removed to reduce file size
+    # required = ['id', 'title', 'description']  # [UNCOMMENT to include description]
     missing = [col_name for col_name in required if col_name not in column_mapping]
     
     if missing:
@@ -121,8 +122,8 @@ def run_step1(spark: SparkSession, input_path: str, output_path: str) -> DataFra
     print(f"\n[3/4] Selecting and renaming columns...")
     selected_df = df.select(
         col(column_mapping['id']).cast(StringType()).alias('id'),
-        col(column_mapping['title']).cast(StringType()).alias('title'),
-        col(column_mapping['description']).cast(StringType()).alias('description')
+        col(column_mapping['title']).cast(StringType()).alias('title')
+        # col(column_mapping['description']).cast(StringType()).alias('description')  # [UNCOMMENT to include description]
     )
     
     # Filter out null and empty strings (safe method)
