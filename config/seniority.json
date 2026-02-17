@@ -1,0 +1,40 @@
+{
+  "entry_level": {
+    "keywords": [
+      "junior",
+      "jr",
+      "entry level",
+      "entry-level",
+      "associate",
+      "graduate",
+      "intern",
+      "internship",
+      "trainee"
+    ],
+    "priority": 1
+  },
+  "mid_level": {
+    "keywords": ["mid level", "mid-level", "intermediate", "experienced"],
+    "priority": 2
+  },
+  "senior": {
+    "keywords": ["senior", "sr", "lead", "principal", "staff"],
+    "priority": 3
+  },
+  "executive": {
+    "keywords": [
+      "director",
+      "vp",
+      "vice president",
+      "head of",
+      "chief",
+      "cto",
+      "ceo",
+      "cfo",
+      "coo",
+      "president",
+      "executive"
+    ],
+    "priority": 4
+  }
+}
