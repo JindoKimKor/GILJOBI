@@ -3,7 +3,7 @@
 # -----------------------------------------------------------------------------
 # Purpose : Step 5 Spark cluster for full accuracy evaluation (Spark + Claude CLI)
 #           DO NOT modify docker-compose.yml — this is a separate file.
-# Image   : Built from Dockerfile.spark-eval (Spark + Node.js + Claude CLI)
+# Image   : Built from Dockerfile.spark-claude (Spark + Node.js + Claude CLI)
 # Auth    : Claude CLI credentials mounted from host (~/.claude)
 #
 # Usage:
@@ -21,7 +21,7 @@ services:
   spark-master:
     build:
       context: .
-      dockerfile: Dockerfile.spark-eval
+      dockerfile: Dockerfile.spark-claude
     container_name: spark-master-eval
     hostname: spark-master-eval
     ports:
@@ -47,7 +47,7 @@ services:
   spark-worker:
     build:
       context: .
-      dockerfile: Dockerfile.spark-eval
+      dockerfile: Dockerfile.spark-claude
     depends_on:
       - spark-master
     volumes:
