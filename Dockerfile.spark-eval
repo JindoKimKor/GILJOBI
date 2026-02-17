@@ -1,0 +1,55 @@
+# =============================================================================
+# Dockerfile.spark-eval
+# -----------------------------------------------------------------------------
+# Purpose : Custom Spark image for Step 5 accuracy evaluation
+#           Extends the base Spark image with Node.js and Claude CLI
+# Base    : apache/spark:latest (same base as the ETL pipeline)
+# Added   : Node.js + Claude CLI (@anthropic-ai/claude-code)
+#
+# Usage   : docker compose -f docker-compose.spark-eval.yml up --build
+# Auth    : Inject ANTHROPIC_API_KEY as environment variable (no `claude login` needed)
+# =============================================================================
+
+FROM apache/spark:latest
+
+# apache/spark:latest runs as non-root user 'spark' — switch to root to install packages
+USER root
+
+# -----------------------------------------------------------------------------
+# 1. System packages — install curl for the Node.js setup script
+#    --no-install-recommends keeps the image size minimal
+# -----------------------------------------------------------------------------
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 2. Node.js 20 LTS
+#    Claude CLI is an npm package, so Node.js is required.
+#    Using the official NodeSource script to pin to Node 20 LTS.
+# -----------------------------------------------------------------------------
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 3. Python packages — pandas is required by the evaluation script
+#    pip3 is already included in the base image
+# -----------------------------------------------------------------------------
+RUN pip3 install --no-cache-dir pandas
+
+# -----------------------------------------------------------------------------
+# 4. Claude CLI
+#    @anthropic-ai/claude-code is the official Claude CLI npm package.
+#    -g installs it globally so `claude` is available on PATH.
+#    --unsafe-perm is required when running npm as root inside a container.
+# -----------------------------------------------------------------------------
+RUN npm install -g @anthropic-ai/claude-code --unsafe-perm
+
+# -----------------------------------------------------------------------------
+# 5. Verify installation — versions will appear in the build log
+# -----------------------------------------------------------------------------
+RUN node --version && npm --version && claude --version && python3 -c "import pandas; print('pandas', pandas.__version__)"
+
+# Restore the original non-root user that Spark expects
+USER spark
