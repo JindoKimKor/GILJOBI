@@ -1,12 +1,12 @@
 # =============================================================================
-# Dockerfile.spark-eval
+# Dockerfile.spark-claude
 # -----------------------------------------------------------------------------
-# Purpose : Custom Spark image for Step 5 accuracy evaluation
+# Purpose : Custom Spark image with Claude CLI for LLM-based tasks
 #           Extends the base Spark image with Node.js and Claude CLI
 # Base    : apache/spark:latest (same base as the ETL pipeline)
 # Added   : Node.js + Claude CLI (@anthropic-ai/claude-code)
 #
-# Usage   : docker compose -f docker-compose.spark-eval.yml up --build
+# Used by : docker-compose.spark-eval.yml, docker-compose.spark-mapping.yml
 # Auth    : Inject ANTHROPIC_API_KEY as environment variable (no `claude login` needed)
 # =============================================================================
 
