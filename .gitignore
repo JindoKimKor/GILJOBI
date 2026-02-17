@@ -9,6 +9,11 @@ __pycache__/
 
 data/processed/step*
 
+# LLM normalization test — data files (CSV outputs, checkpoints) are too large for GitHub
+# Code files (.py, .ipynb) are tracked; data is not.
+data/processed/llm_title_normalization_test/**/*.csv
+data/processed/llm_title_normalization_test/**/*.json
+
 # C extensions
 *.so
 
