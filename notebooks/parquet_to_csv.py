@@ -45,6 +45,7 @@ def main():
         .write
         .mode("overwrite")
         .option("header", True)
+        .option("escape", '"')
         .csv(args.output)
     )
 
