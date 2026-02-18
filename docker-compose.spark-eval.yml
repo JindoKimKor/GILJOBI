@@ -1,0 +1,63 @@
+# =============================================================================
+# docker-compose.spark-eval.yml
+# -----------------------------------------------------------------------------
+# Purpose : Step 5 Spark cluster for full accuracy evaluation (Spark + Claude CLI)
+#           DO NOT modify docker-compose.yml — this is a separate file.
+# Image   : Built from Dockerfile.spark-eval (Spark + Node.js + Claude CLI)
+# Auth    : Claude CLI credentials mounted from host (~/.claude)
+#
+# Usage:
+#   docker compose -f docker-compose.spark-eval.yml up --build --scale spark-worker=8
+#   docker compose -f docker-compose.spark-eval.yml down
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Spark Master
+  # Manages the cluster and distributes tasks to workers.
+  # UI available at http://localhost:8080
+  # ---------------------------------------------------------------------------
+  spark-master:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark-eval
+    container_name: spark-master-eval
+    hostname: spark-master-eval
+    ports:
+      - "8080:8080"   # Spark Master Web UI
+      - "7077:7077"   # Spark Master internal communication port
+      - "4040:4040"   # Spark Application UI (active job monitoring)
+    volumes:
+      - ./data:/opt/spark/data             # Shared data directory (input/output CSVs)
+      - ./notebooks:/opt/spark/notebooks   # Shared notebooks directory
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    command: >
+      bash -c "/opt/spark/bin/spark-class org.apache.spark.deploy.master.Master"
+
+  # ---------------------------------------------------------------------------
+  # Spark Worker
+  # Scale with: --scale spark-worker=8
+  # No fixed host port — multiple containers can't bind the same host port.
+  # Worker status is visible on the Master UI at http://localhost:8080
+  # Auth: host ~/.claude mounted read-only → Claude CLI uses OAuth credentials
+  #       same as local machine, no separate API key needed.
+  # ---------------------------------------------------------------------------
+  spark-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark-eval
+    depends_on:
+      - spark-master
+    volumes:
+      - ./data:/opt/spark/data
+      - ./notebooks:/opt/spark/notebooks
+      - C:/Users/blitz/.claude:/tmp/.claude       # Claude CLI credentials — needs write access for todos/ and debug/ session files
+    environment:
+      - SPARK_MASTER=spark://spark-master-eval:7077
+      - SPARK_WORKER_CORES=1
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_NO_DAEMONIZE=true
+    command: >
+      bash -c "/opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master-eval:7077"
