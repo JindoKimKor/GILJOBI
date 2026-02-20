@@ -17,21 +17,52 @@ This platform processes historical job postings to help job seekers understand:
 
 **Key Innovation:** LLM-powered job title normalization that learns from actual data patterns, and multi-threading process using Apache Spark.
 
-## How To Start Project
-
-1. Start Spark containers
+## How To Start Containers
 
 ```bash
 docker compose up -d
 ```
 
-2. Access the Spark master container
+## How To Run Pre-Processing Jobs on Airflow
+
+> Airflow/Spark/Livy containers should be up.
+
+1. Open Airflow UI at localhost
+
+```bash
+http://localhost:8090
+```
+
+![airflow_login](images/airflow_login.png)
+
+### Login credentials
+
+- Username: _airflow_
+- Password: _airflow_
+
+2. Select and run a DAG from the DAG list
+
+![dag_list](images/dag_list.png)
+
+3. Set `enable_partial_match` to enable partial matching in step 3
+
+![dag_param](images/dag_param.png)
+
+4. Monitor each step's progress in the **Graph** tab
+
+![dag_overview](images/dag_overview.png)
+
+## How To Run Pre-Processing Jobs on CLI
+
+> Spark containers should be up.
+
+1. Access the Spark master container
 
 ```bash
 docker exec -it spark-master bash
 ```
 
-3. Run python scripts for each processing step
+2. Run python scripts for each processing step
 
 ```bash
 /opt/spark/bin/spark-submit /opt/spark/notebooks/<python-file>
@@ -43,13 +74,13 @@ docker exec -it spark-master bash
 /opt/spark/bin/spark-submit /opt/spark/notebooks/step1_select_colums.py
 ```
 
-4. Convert parquet into csv (optional)
+3. Convert parquet into csv (optional)
 
 ```bash
 /opt/spark/bin/spark-submit /opt/spark/notebooks/parquet_to_csv.py --input /opt/spark/data/processed/step1_selected --output /opt/spark/data/processed/step1_selected/preview_csv_small
 ```
 
-5. Upload parquet to SQL server
+4. Upload parquet to SQL server
 
 ```bash
 /opt/spark/bin/spark-submit \
@@ -58,6 +89,7 @@ docker exec -it spark-master bash
     /opt/spark/notebooks/upload_to_postgres.py \
     --input /opt/spark/data/processed/<parquet_file> \
     --mode append
+    --enable-partial-match
 ```
 
 ## 🎯 Core Features

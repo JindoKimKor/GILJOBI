@@ -2,9 +2,9 @@
 Step 1: Select Required Columns with Flexible Column Matching
 
 Automatically finds and standardizes columns:
-- ID columns (job_id, posting_id, id, etc.) → 'id'
-- Title columns (title, job_title, position, etc.) → 'title'
-- Description columns (description, desc, job_description, etc.) → 'description' [COMMENTED OUT - uncomment if needed]
+- ID columns (job_id, posting_id, id, etc.) -> 'id'
+- Title columns (title, job_title, position, etc.) -> 'title'
+- Description columns (description, desc, job_description, etc.) -> 'description' [COMMENTED OUT - uncomment if needed]
 
 Input: Raw CSV
 Output: Parquet with standardized columns [id, title]  # description removed to reduce file size
@@ -116,7 +116,7 @@ def run_step1(spark: SparkSession, input_path: str, output_path: str) -> DataFra
     
     print(f"      Column mapping:")
     for target, source in column_mapping.items():
-        print(f"        {target:15} ← {source}")
+        print(f"        {target:15} <- {source}")
     
     # 3. Select columns and rename (with explicit type casting)
     print(f"\n[3/4] Selecting and renaming columns...")
@@ -142,7 +142,7 @@ def run_step1(spark: SparkSession, input_path: str, output_path: str) -> DataFra
     # 4. Save to Parquet
     print(f"\n[4/4] Saving to: {output_path}")
     cleaned_df.write.mode('overwrite').parquet(output_path)
-    print(f"      ✓ Saved as Parquet")
+    print(f"      [OK] Saved as Parquet")
     
     # Show sample output
     print(f"\nSample Output (first 5 rows):")
@@ -169,14 +169,14 @@ if __name__ == "__main__":
             output_path="/opt/spark/data/processed/step1_selected"
         )
         
-        print(f"\n✓ Step 1 completed successfully")
+        print(f"\n[OK] Step 1 completed successfully")
         print(f"  Final schema:")
         result_df.printSchema()
         print(f"  Column count: {len(result_df.columns)}")
         print(f"  Record count: {result_df.count():,}")
         
     except Exception as e:
-        print(f"\n✗ ERROR: {str(e)}")
+        print(f"\n[ERROR] ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         
