@@ -43,10 +43,21 @@ docker exec -it spark-master bash
 /opt/spark/bin/spark-submit /opt/spark/notebooks/step1_select_colums.py
 ```
 
-4. Convert parquet files into csv (optional)
+4. Convert parquet into csv (optional)
 
 ```bash
 /opt/spark/bin/spark-submit /opt/spark/notebooks/parquet_to_csv.py --input /opt/spark/data/processed/step1_selected --output /opt/spark/data/processed/step1_selected/preview_csv_small
+```
+
+5. Upload parquet to SQL server
+
+```bash
+/opt/spark/bin/spark-submit \
+    --master spark://spark-master:7077 \
+    --jars /opt/spark/jars/custom/postgresql-42.7.1.jar \
+    /opt/spark/notebooks/upload_to_postgres.py \
+    --input /opt/spark/data/processed/<parquet_file> \
+    --mode append
 ```
 
 ## 🎯 Core Features
