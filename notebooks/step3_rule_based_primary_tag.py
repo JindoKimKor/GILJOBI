@@ -89,7 +89,7 @@ def match_job_tag_improved(
     enable_partial: bool = False
 ) -> Tuple[str, str]:
     """
-    Improved matching: exact main -> exact sub -> partial (taxonomy words ⊂ DB title words)
+    Improved matching: exact main -> exact sub -> partial (taxonomy words are in DB title words)
     """
     if not title:
         return "", "no_match"

@@ -157,13 +157,13 @@ def run_step2(spark: SparkSession, input_path: str, output_path: str) -> DataFra
     print(f"\n[3/4] Extracting seniority levels...")
     result_df = add_seniority_columns(df, config, title_column='title')
     
-    print(f"      ✓ Added columns: seniority, seniority_removed_title")
-    print(f"      ✓ Preserved all original columns")
+    print(f"      [OK] Added columns: seniority, seniority_removed_title")
+    print(f"      [OK] Preserved all original columns")
     
     # 4. Save to Parquet
     print(f"\n[4/4] Saving to: {output_path}")
     result_df.write.mode('overwrite').parquet(output_path)
-    print(f"      ✓ Saved as Parquet")
+    print(f"      [OK] Saved as Parquet")
     
     # Show distribution
     print(f"\nSeniority Distribution:")
@@ -198,11 +198,11 @@ if __name__ == "__main__":
             output_path="/opt/spark/data/processed/step2_with_seniority"
         )
         
-        print(f"\n✓ Step 2 completed successfully")
+        print(f"\n[OK] Step 2 completed successfully")
         print(f"  Output columns: {result_df.columns}")
         
     except Exception as e:
-        print(f"\n✗ ERROR: {str(e)}")
+        print(f"\n[ERROR] ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         
