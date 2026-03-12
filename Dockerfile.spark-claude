@@ -33,10 +33,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
-# 3. Python packages — pandas is required by the evaluation script
+# 3. Python packages
+#    - pandas  : dataframe operations in evaluation & mapping scripts
+#    - pyarrow : parquet I/O (phase3 mapping reads/writes parquet)
 #    pip3 is already included in the base image
 # -----------------------------------------------------------------------------
-RUN pip3 install --no-cache-dir pandas
+RUN pip3 install --no-cache-dir pandas pyarrow
 
 # -----------------------------------------------------------------------------
 # 4. Claude CLI
@@ -49,7 +51,9 @@ RUN npm install -g @anthropic-ai/claude-code --unsafe-perm
 # -----------------------------------------------------------------------------
 # 5. Verify installation — versions will appear in the build log
 # -----------------------------------------------------------------------------
-RUN node --version && npm --version && claude --version && python3 -c "import pandas; print('pandas', pandas.__version__)"
+RUN node --version && npm --version && claude --version && \
+    python3 -c "import pandas; print('pandas', pandas.__version__)" && \
+    python3 -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
 
 # Restore the original non-root user that Spark expects
 USER spark
