@@ -21,8 +21,8 @@ from pathlib import Path
 SPARK_MASTER   = 'spark://spark-master-eval:7077'
 APP_NAME       = 'onet-accuracy-eval'
 
-INPUT_DIR      = Path('/opt/spark/data/processed/llm_title_normalization_test/step-3-add-descriptions/top10_onet_tagged_with_desc')
-OUTPUT_DIR     = Path('/opt/spark/data/processed/llm_title_normalization_test/step-5-spark-eval/all_companies_eval')
+INPUT_DIR      = Path('/opt/spark/data/processed/llm_title_accuracy_test/step-3-add-descriptions/top10_onet_tagged_with_desc')
+OUTPUT_DIR     = Path('/opt/spark/data/processed/llm_title_accuracy_test/step-5-spark-eval/all_companies_eval')
 CHECKPOINT_DIR = OUTPUT_DIR / 'checkpoints'
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -101,7 +101,7 @@ def evaluate_partition(rows):
 
     batch_id   = batch[0]['batch_id']
     checkpoint = Path(
-        '/opt/spark/data/processed/llm_title_normalization_test'
+        '/opt/spark/data/processed/llm_title_accuracy_test'
         '/step-5-spark-eval/all_companies_eval/checkpoints'
         f'/batch_{batch_id}.json'
     )
