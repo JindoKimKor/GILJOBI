@@ -1,0 +1,67 @@
+# =============================================================================
+# docker-compose.spark-mapping.yml
+# -----------------------------------------------------------------------------
+# Purpose : Step 4 Spark cluster for LLM-based O*NET mapping (Spark + Claude CLI)
+#           58,979 unique titles → O*NET primary_tag via Opus
+# Image   : Built from Dockerfile.spark-claude (Spark + Node.js + Claude CLI)
+# Auth    : Claude CLI credentials mounted from host (~/.claude)
+#
+# Usage:
+#   docker compose -f docker-compose.spark-mapping.yml up --build --scale spark-worker=24
+#   docker compose -f docker-compose.spark-mapping.yml down
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Spark Master
+  # Manages the cluster and distributes tasks to workers.
+  # UI available at http://localhost:8080
+  # ---------------------------------------------------------------------------
+  spark-master:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark-claude
+    container_name: spark-master-mapping
+    hostname: spark-master-mapping
+    ports:
+      - "8080:8080"   # Spark Master Web UI
+      - "7077:7077"   # Spark Master internal communication port
+      - "4040:4040"   # Spark Application UI (active job monitoring)
+    volumes:
+      - ./data:/opt/spark/data
+      - ./notebooks:/opt/spark/notebooks
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    command: >
+      bash -c "/opt/spark/bin/spark-class org.apache.spark.deploy.master.Master"
+
+  # ---------------------------------------------------------------------------
+  # Spark Worker
+  # Scale with: --scale spark-worker=24
+  # CPU: 0.5 per container (24 × 0.5 = 12 cores / 20 threads)
+  # Memory: 1g per worker (API wait time is 99% of processing, not CPU/memory bound)
+  # 24 workers × 1g = 24GB / 32GB RAM
+  # Auth: host ~/.claude mounted → Claude CLI uses OAuth credentials
+  # ---------------------------------------------------------------------------
+  spark-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark-claude
+    depends_on:
+      - spark-master
+    volumes:
+      - ./data:/opt/spark/data
+      - ./notebooks:/opt/spark/notebooks
+      - C:/Users/blitz/.claude:/tmp/.claude
+    environment:
+      - SPARK_MASTER=spark://spark-master-mapping:7077
+      - SPARK_WORKER_CORES=1
+      - SPARK_WORKER_MEMORY=1g
+      - SPARK_NO_DAEMONIZE=true
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+    command: >
+      bash -c "/opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master-mapping:7077"
