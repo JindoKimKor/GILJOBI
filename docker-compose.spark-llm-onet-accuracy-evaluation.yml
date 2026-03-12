@@ -1,14 +1,14 @@
 # =============================================================================
-# docker-compose.spark-eval.yml
+# docker-compose.spark-llm-onet-accuracy-evaluation.yml
 # -----------------------------------------------------------------------------
 # Purpose : Step 5 Spark cluster for full accuracy evaluation (Spark + Claude CLI)
 #           DO NOT modify docker-compose.yml — this is a separate file.
-# Image   : Built from Dockerfile.spark-claude (Spark + Node.js + Claude CLI)
+# Image   : Built from Dockerfile.spark-llm-onet-worker (Spark + Node.js + Claude CLI)
 # Auth    : Claude CLI credentials mounted from host (~/.claude)
 #
 # Usage:
-#   docker compose -f docker-compose.spark-eval.yml up --build --scale spark-worker=8
-#   docker compose -f docker-compose.spark-eval.yml down
+#   docker compose -f docker-compose.spark-llm-onet-accuracy-evaluation.yml up --build --scale spark-worker=8
+#   docker compose -f docker-compose.spark-llm-onet-accuracy-evaluation.yml down
 # =============================================================================
 
 services:
@@ -21,7 +21,7 @@ services:
   spark-master:
     build:
       context: .
-      dockerfile: Dockerfile.spark-claude
+      dockerfile: Dockerfile.spark-llm-onet-worker
     container_name: spark-master-eval
     hostname: spark-master-eval
     ports:
@@ -47,7 +47,7 @@ services:
   spark-worker:
     build:
       context: .
-      dockerfile: Dockerfile.spark-claude
+      dockerfile: Dockerfile.spark-llm-onet-worker
     depends_on:
       - spark-master
     volumes:

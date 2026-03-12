@@ -1,14 +1,14 @@
 # =============================================================================
-# docker-compose.spark-mapping.yml
+# docker-compose.spark-llm-onet-job-title-normalization.yml
 # -----------------------------------------------------------------------------
 # Purpose : Step 4 Spark cluster for LLM-based O*NET mapping (Spark + Claude CLI)
 #           58,979 unique titles → O*NET primary_tag via Opus
-# Image   : Built from Dockerfile.spark-claude (Spark + Node.js + Claude CLI)
+# Image   : Built from Dockerfile.spark-llm-onet-worker (Spark + Node.js + Claude CLI)
 # Auth    : Claude CLI credentials mounted from host (~/.claude)
 #
 # Usage:
-#   docker compose -f docker-compose.spark-mapping.yml up --build --scale spark-worker=24
-#   docker compose -f docker-compose.spark-mapping.yml down
+#   docker compose -f docker-compose.spark-llm-onet-job-title-normalization.yml up --build --scale spark-worker=24
+#   docker compose -f docker-compose.spark-llm-onet-job-title-normalization.yml down
 # =============================================================================
 
 services:
@@ -21,7 +21,7 @@ services:
   spark-master:
     build:
       context: .
-      dockerfile: Dockerfile.spark-claude
+      dockerfile: Dockerfile.spark-llm-onet-worker
     container_name: spark-master-mapping
     hostname: spark-master-mapping
     ports:
@@ -47,7 +47,7 @@ services:
   spark-worker:
     build:
       context: .
-      dockerfile: Dockerfile.spark-claude
+      dockerfile: Dockerfile.spark-llm-onet-worker
     depends_on:
       - spark-master
     volumes:
