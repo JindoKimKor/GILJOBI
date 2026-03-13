@@ -40,7 +40,7 @@ def load_noc_titles(df: pd.DataFrame, conn) -> int:
         conn: Active psycopg2 connection.
 
     Returns:
-        Number of rows actually inserted (excludes skipped duplicates).
+        Total number of rows in noc_titles table after insert.
     """
     cur = conn.cursor()
     rows = list(df[["noc21_code", "noc21_name"]].itertuples(index=False, name=None))
@@ -49,7 +49,10 @@ def load_noc_titles(df: pd.DataFrame, conn) -> int:
         "INSERT INTO noc_titles (noc21_code, noc21_name) VALUES %s ON CONFLICT (noc21_code) DO NOTHING",
         rows,
     )
-    count = cur.rowcount
+    # execute_values rowcount only reflects the last page (page_size=100),
+    # so query the actual table count instead.
+    cur.execute("SELECT COUNT(*) FROM noc_titles")
+    count = cur.fetchone()[0]
     conn.commit()
     cur.close()
     return count

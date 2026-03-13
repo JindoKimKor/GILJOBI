@@ -122,8 +122,17 @@ def prepare_job_postings(df: pd.DataFrame) -> pd.DataFrame:
 
     result["first_posting_date"] = pd.to_datetime(result["first_posting_date"])
 
+    # Drop rows with incomplete NOC classification (~0.8% of records).
+    # Rows missing any of the 4 NOC columns are unclassified by Job Bank,
+    # often with unnormalized titles (e.g., raw employer descriptions).
+    noc_source_cols = ["NOC21 Code", "NOC21 Code Name", "NOC 2016 Code", "NOC 2016 Code Name"]
+    result = result.dropna(subset=noc_source_cols)
+
     # Drop rows with no job title (DB NOT NULL constraint; ~14 out of 3M)
     result = result.dropna(subset=["normalized_title"])
+
+    # Drop rows missing province or city (~1.4% of records)
+    result = result.dropna(subset=["province", "city"])
 
     return result[[
         "noc_id", "normalized_title", "vacancy_count",

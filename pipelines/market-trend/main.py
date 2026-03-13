@@ -42,8 +42,9 @@ from src.transform import (
 )
 from src.load import get_connection, load_noc_titles, load_job_postings
 
-# Default PostgreSQL connection (Docker infra/docker-compose.yml)
-DEFAULT_DB = "postgresql://postgres:postgres@localhost:5432/giljobi"
+# Default PostgreSQL connection — override with DATABASE_URL env var or --db flag.
+# Local default matches Docker infra/docker-compose.yml.
+DEFAULT_DB = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/giljobi")
 
 # Raw CSV storage directory (relative to repo root)
 RAW_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "raw", "market-trend")
@@ -70,7 +71,7 @@ def run_noc_setup(conn):
     noc_df = pd.read_csv(NOC_MASTER_URL)
     noc_titles = prepare_noc_titles(noc_df)
     count = load_noc_titles(noc_titles, conn)
-    print(f"[NOC SETUP] Loaded {count} NOC titles into DB ({len(noc_titles)} total in source).")
+    print(f"[NOC SETUP] {count} NOC titles in DB ({len(noc_titles)} in source CSV).")
     return noc_titles
 
 
