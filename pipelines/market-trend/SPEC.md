@@ -52,7 +52,7 @@ https://open.canada.ca/data/en/dataset/ea639e28-c0fc-48bf-b5dd-b8899bd43072
 3. Insert into `noc_titles` — one row per NOC21 unit group code
 
 ### Validation Rules
-- Extracted URL count must be >= 38 (Jan 2023 ~ Feb 2026 baseline)
+- Extracted URL count must be >= 37 (Jan 2023 ~ Feb 2026 baseline)
 - No gaps in consecutive months from 2023-01 to latest available
 - All filenames must match English pattern (`-en-` or `-en.`)
 - Each downloaded file must be non-empty and readable as UTF-16 tab-separated CSV

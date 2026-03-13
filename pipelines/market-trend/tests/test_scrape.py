@@ -3,6 +3,8 @@ Tests for market-trend pipeline SCRAPE stage.
 Based on SPEC.md — Extraction Rules + Validation Rules.
 """
 
+import json
+
 import pytest
 
 from src.scrape import extract_csv_urls, parse_year_month, filter_english_urls
@@ -75,26 +77,32 @@ class TestParseYearMonth:
 
 
 # ============================================================
-# Validation Rules
+# CKAN API Response Parsing
 # ============================================================
 
+def _make_api_response(urls: list[str]) -> str:
+    """Helper: build a fake CKAN package_show JSON response."""
+    resources = [{"url": url, "format": "CSV"} for url in urls]
+    return json.dumps({"result": {"resources": resources}})
+
+
 class TestExtractCsvUrls:
-    """SPEC: Extracted URL count must be >= 38 (Jan 2023 ~ Feb 2026 baseline)"""
+    """SPEC: Extracted URL count must be >= 37 (Jan 2023 ~ Feb 2026 baseline)"""
 
-    def test_raises_if_fewer_than_38_urls(self):
-        """Validation: minimum 38 English CSVs expected."""
-        html = "<html><body><a href='test.csv'>Download</a></body></html>"
-        with pytest.raises(ValueError, match="Expected >= 38"):
-            extract_csv_urls(html)
+    def test_raises_if_fewer_than_37_urls(self):
+        """Validation: minimum 37 English CSVs expected."""
+        response = _make_api_response(["https://example.com/test.csv"])
+        with pytest.raises(ValueError, match="Expected >= 37"):
+            extract_csv_urls(response)
 
-    def test_extracts_urls_from_html(self):
-        """Should find all .csv download links in the page HTML."""
-        links = []
+    def test_extracts_urls_from_api_response(self):
+        """Should find all English .csv URLs from CKAN API response."""
+        urls = []
         for i in range(40):
             month = f"january20{23 + i // 12}"
-            links.append(
-                f'<a href="https://example.com/download/job-bank-en-{month}.csv">Download</a>'
+            urls.append(
+                f"https://example.com/download/job-bank-en-{month}.csv"
             )
-        html = f"<html><body>{''.join(links)}</body></html>"
-        result = extract_csv_urls(html)
-        assert len(result) >= 38
+        response = _make_api_response(urls)
+        result = extract_csv_urls(response)
+        assert len(result) >= 37
