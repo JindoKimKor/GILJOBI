@@ -202,11 +202,13 @@ class TestPrepareJobPostings:
         "salary_min_hourly", "salary_max_hourly",
     ]
 
-    def _make_input_df(self):
-        return pd.DataFrame({
+    def _make_input_df(self, **overrides):
+        data = {
             "Job Title": ["Software Engineer"],
             "NOC21 Code": ["21232"],
             "NOC21 Code Name": ["Software developers"],
+            "NOC 2016 Code": ["2174"],
+            "NOC 2016 Code Name": ["Computer programmers and interactive media developers"],
             "Vacancy Count": [3],
             "Province/Territory": ["Ontario"],
             "City": ["Toronto"],
@@ -219,7 +221,9 @@ class TestPrepareJobPostings:
             "noc_id": [1],
             "salary_min_hourly": [25.0],
             "salary_max_hourly": [35.0],
-        })
+        }
+        data.update(overrides)
+        return pd.DataFrame(data)
 
     def test_output_has_correct_columns(self):
         df = self._make_input_df()
@@ -256,3 +260,27 @@ class TestPrepareJobPostings:
         assert result["noc_id"].iloc[0] == 1
         assert result["salary_min_hourly"].iloc[0] == 25.0
         assert result["salary_max_hourly"].iloc[0] == 35.0
+
+    def test_keeps_rows_with_all_noc_columns(self):
+        """Rows with all 4 NOC columns present should be kept."""
+        df = self._make_input_df()
+        result = prepare_job_postings(df)
+        assert len(result) == 1
+
+    def test_drops_rows_with_any_noc_column_null(self):
+        """Rows missing any of the 4 NOC columns should be excluded."""
+        # NOC21 Code is null, NOC 2016 exists
+        df = self._make_input_df(**{"NOC21 Code": [None]})
+        result = prepare_job_postings(df)
+        assert len(result) == 0
+
+    def test_drops_rows_with_all_noc_columns_null(self):
+        """Rows missing all 4 NOC columns should be excluded."""
+        df = self._make_input_df(**{
+            "NOC21 Code": [None],
+            "NOC21 Code Name": [None],
+            "NOC 2016 Code": [None],
+            "NOC 2016 Code Name": [None],
+        })
+        result = prepare_job_postings(df)
+        assert len(result) == 0
