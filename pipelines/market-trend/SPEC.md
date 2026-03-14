@@ -8,11 +8,11 @@
 | Property | Value |
 |---|---|
 | Source | Canada Job Bank Open Data |
-| Format | CSV (UTF-16, tab-separated) |
+| Format | CSV (mixed: UTF-16/tab, UTF-8-sig/comma, Latin-1/comma) |
 | Release Frequency | Monthly |
 | Historical Range | Jan 2023 ~ Feb 2026 (~38 files) |
 | Rows per Month | ~44,000 |
-| Total Estimated Rows | ~1,670,000 |
+| Total Estimated Rows | ~3,300,000 |
 | Processing Engine | pandas (no Spark required) |
 | Open Data Portal | https://open.canada.ca/data/en/dataset/ea639e28-c0fc-48bf-b5dd-b8899bd43072 |
 

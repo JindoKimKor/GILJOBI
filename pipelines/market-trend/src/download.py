@@ -8,6 +8,10 @@ Supports idempotent re-runs by skipping files that already exist on disk.
 import os
 
 
+# ============================================================
+# Download Planning
+# ============================================================
+
 def build_download_plan(urls: dict[str, str], output_dir: str) -> dict[str, str]:
     """Determine which files still need to be downloaded.
 
@@ -28,6 +32,10 @@ def build_download_plan(urls: dict[str, str], output_dir: str) -> dict[str, str]
             plan[year_month] = url
     return plan
 
+
+# ============================================================
+# File I/O
+# ============================================================
 
 def save_csv(content: bytes, year_month: str, output_dir: str) -> str:
     """Save raw CSV bytes to disk with normalized naming.

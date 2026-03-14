@@ -16,6 +16,11 @@ import json
 import re
 import urllib.request
 
+
+# ============================================================
+# Constants
+# ============================================================
+
 # CKAN API endpoint — returns all resources for the dataset in one call
 DATASET_ID = "ea639e28-c0fc-48bf-b5dd-b8899bd43072"
 API_URL = f"https://open.canada.ca/data/api/3/action/package_show?id={DATASET_ID}"
@@ -41,6 +46,10 @@ MONTH_MAP = {
 }
 
 
+# ============================================================
+# URL Filtering
+# ============================================================
+
 def filter_english_urls(urls: list[str]) -> list[str]:
     """Filter URLs to keep only English-language CSV files.
 
@@ -55,6 +64,10 @@ def filter_english_urls(urls: list[str]) -> list[str]:
     """
     return [u for u in urls if "-en-" in u or "-en." in u]
 
+
+# ============================================================
+# URL Parsing
+# ============================================================
 
 def parse_year_month(url: str) -> str:
     """Extract YYYY-MM from a CSV download URL.
@@ -87,6 +100,10 @@ def parse_year_month(url: str) -> str:
     month_num = MONTH_MAP[month_str]
     return f"{year}-{month_num}"
 
+
+# ============================================================
+# API Response Parsing
+# ============================================================
 
 def extract_csv_urls(api_response: str) -> list[str]:
     """Parse CKAN API response and return all English CSV download URLs.

@@ -16,6 +16,10 @@ import psycopg2
 from psycopg2.extras import execute_values
 
 
+# ============================================================
+# Connection
+# ============================================================
+
 def get_connection(connection_string: str):
     """Create a PostgreSQL database connection.
 
@@ -28,6 +32,10 @@ def get_connection(connection_string: str):
     """
     return psycopg2.connect(connection_string)
 
+
+# ============================================================
+# NOC Titles
+# ============================================================
 
 def load_noc_titles(df: pd.DataFrame, conn) -> int:
     """Insert NOC title rows into the noc_titles table.
@@ -57,6 +65,10 @@ def load_noc_titles(df: pd.DataFrame, conn) -> int:
     cur.close()
     return count
 
+
+# ============================================================
+# Job Postings
+# ============================================================
 
 def load_job_postings(df: pd.DataFrame, conn) -> int:
     """Insert job posting rows using PostgreSQL COPY for bulk loading.
