@@ -15,6 +15,11 @@ TRANSFORM stage can read it correctly.
 import os
 import pandas as pd
 
+
+# ============================================================
+# Configuration
+# ============================================================
+
 # Columns required by the TRANSFORM and LOAD stages.
 # See SPEC.md Input Schema for full column descriptions.
 REQUIRED_COLUMNS = [
@@ -35,6 +40,10 @@ CSV_FORMATS = [
     {"encoding": "latin-1", "sep": ","},
 ]
 
+
+# ============================================================
+# Validation
+# ============================================================
 
 def validate_csv(filepath: str) -> dict:
     """Validate a downloaded Job Bank CSV file.

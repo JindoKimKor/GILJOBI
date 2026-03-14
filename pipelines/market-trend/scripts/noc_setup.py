@@ -10,12 +10,21 @@ Source: https://www.statcan.gc.ca/en/subjects/standard/noc/2021/indexV1
 
 import pandas as pd
 
+
+# ============================================================
+# Constants
+# ============================================================
+
 # Official Statistics Canada NOC 2021 classification structure CSV
 NOC_MASTER_URL = (
     "https://www.statcan.gc.ca/en/subjects/standard/noc/2021/"
     "indexV1/noc-2021-v1.0-classification-structure.csv"
 )
 
+
+# ============================================================
+# Data Preparation
+# ============================================================
 
 def filter_unit_groups(df: pd.DataFrame) -> pd.DataFrame:
     """Filter to Level 5 (Unit Group) rows only.

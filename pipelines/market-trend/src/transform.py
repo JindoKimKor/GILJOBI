@@ -10,6 +10,11 @@ Transforms raw Job Bank CSV data into the job_postings DB schema:
 
 import pandas as pd
 
+
+# ============================================================
+# Constants
+# ============================================================
+
 # Divisors to convert each salary unit to hourly rate.
 # Based on standard full-time assumptions: 8h/day, 40h/week, 52 weeks/year.
 SALARY_DIVISORS = {
@@ -21,6 +26,10 @@ SALARY_DIVISORS = {
     "Year": 2080,       # 40 hours/week x 52 weeks
 }
 
+
+# ============================================================
+# Salary Normalization
+# ============================================================
 
 def normalize_salary_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
     """Convert Salary Minimum/Maximum to hourly rate based on Salary Per unit.
@@ -48,6 +57,10 @@ def normalize_salary_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+# ============================================================
+# Outlier Filtering
+# ============================================================
+
 def apply_outlier_filter(df: pd.DataFrame) -> pd.DataFrame:
     """Set outlier hourly rates to NULL.
 
@@ -70,6 +83,10 @@ def apply_outlier_filter(df: pd.DataFrame) -> pd.DataFrame:
 
     return result
 
+
+# ============================================================
+# NOC Mapping
+# ============================================================
 
 def map_noc_ids(df: pd.DataFrame, noc_lookup: dict) -> pd.DataFrame:
     """Map NOC21 codes to noc_titles.id foreign keys.
@@ -94,6 +111,10 @@ def map_noc_ids(df: pd.DataFrame, noc_lookup: dict) -> pd.DataFrame:
     result["noc_id"] = codes.dropna().astype(int).astype(str).map(noc_lookup)
     return result
 
+
+# ============================================================
+# Column Selection
+# ============================================================
 
 def prepare_job_postings(df: pd.DataFrame) -> pd.DataFrame:
     """Select and rename columns to match the job_postings DB schema.
