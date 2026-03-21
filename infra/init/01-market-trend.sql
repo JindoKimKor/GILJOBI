@@ -1,3 +1,4 @@
+-- Market Trend Stream: Job Bank data tables
 CREATE TABLE IF NOT EXISTS noc_titles (
     id SERIAL PRIMARY KEY,
     noc21_code VARCHAR(10) UNIQUE NOT NULL,

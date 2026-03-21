@@ -1,0 +1,50 @@
+# =============================================================================
+# docker-compose.postgres.yml
+# -----------------------------------------------------------------------------
+# Purpose : Pipeline data database (local development)
+# Module  : postgres
+#
+# Usage:
+#   ./up.sh postgres
+#
+# Notes:
+#   - Schema files in init/ are executed alphabetically on first startup
+#   - Adding a new stream: create init/NN-stream-name.sql (OCP)
+#   - For cloud DB (e.g., Neon), skip this module and pass connection
+#     string directly to the pipeline or Airflow DAG
+#   - Config values read from .env (symlinked from config/)
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 17
+  # Pipeline data DB for all streams (job_postings, noc_titles, etc.)
+  # Host: localhost:5432
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:17
+    container_name: market-trend-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ${INFRA_HOST_PATH:-.}/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+networks:
+  default:
+    name: giljobi-network
+    external: true
+
+volumes:
+  postgres_data:
