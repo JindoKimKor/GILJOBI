@@ -17,26 +17,41 @@ DAG-managed modular infrastructure where Airflow orchestrates the entire data li
 
 ## Architecture
 
+Only Airflow is started manually. DAGs manage all other infrastructure automatically.
+
+```mermaid
+flowchart LR
+    USER["👤 Developer<br/>./infra/up.sh airflow"]
+
+    subgraph ENGINE["Docker Engine"]
+        AIRFLOW["📁 Airflow<br/>Orchestration<br/>:8090"]
+        DB["📁 Pipeline DB<br/>PostgreSQL<br/>:5432"]
+        SPARK["📁 Spark + Livy<br/>Distributed Processing<br/>:8080 :8998"]
+        NET{{"giljobi-network"}}
+    end
+
+    USER -- "manual start" --> AIRFLOW
+    AIRFLOW -. "ensure_db<br/>(market-trend)" .-> DB
+    AIRFLOW -. "TBD<br/>(matching-insights)" .-> SPARK
+    AIRFLOW --- NET
+    DB --- NET
+    SPARK --- NET
+
+    style ENGINE fill:none,stroke:#888,stroke-width:2px,stroke-dasharray:5,color:#888
+    style AIRFLOW fill:#0D47A1,color:#fff
+    style DB fill:#BF360C,color:#fff
+    style SPARK fill:#4A148C,color:#fff
+    style NET fill:#1B5E20,stroke:#4CAF50,color:#fff
+```
+
+For detailed architecture, see [infra/SPEC.md](infra/SPEC.md).
+
 ### Two-Stream Pipeline
 
 | Stream | Source | Volume | Processing | Status |
 |--------|--------|--------|------------|--------|
 | **Market Trend** | Canada Job Bank Open Data | ~3.3M rows | Python + pandas | Completed |
 | **Matching Insights** | LinkedIn/Kaggle | ~123K rows | Spark + Claude LLM | Under Construction |
-
-### Infrastructure (Modular Docker Compose)
-
-```
-infra/
-├── docker-compose.airflow.yml     # Airflow + Redis + metadata DB (always on)
-├── docker-compose.postgres.yml    # Pipeline data DB (DAG-managed)
-├── docker-compose.spark.yml       # Spark + Livy (DAG-managed)
-├── config/                        # .env.development, .env.production
-├── up.sh                          # Start modules
-└── down.sh                        # Stop modules
-```
-
-Only Airflow is started manually. DAGs manage all other infrastructure (DB, Spark) automatically.
 
 ### Repo Structure
 
@@ -46,9 +61,9 @@ Giljobi-DataPipeline/
 │   ├── market_trend_dag.py
 │   └── matching_insights_preprocessing_dag.py
 ├── pipelines/
-│   ├── market-trend/              # Job Bank ETL (5-stage pipeline)
-│   └── matching-insights/         # LinkedIn pre-processing + LLM normalization
-├── infra/                         # Modular shared infrastructure
+│   ├── market-trend/              # Job Bank ETL — SPEC / RUNBOOK
+│   └── matching-insights/         # LinkedIn pre-processing + LLM
+├── infra/                         # Modular infrastructure — SPEC
 └── data/                          # Local data (gitignored)
 ```
 
@@ -74,15 +89,17 @@ Configuration (replicas, memory, cores, credentials) is in `infra/config/.env.de
 1. Start Airflow: `./infra/up.sh airflow`
 2. Open Airflow UI: http://localhost:8090
 3. Enable `market_trend_pipeline` DAG
-4. Click "Trigger DAG" — DB starts/stops automatically
+4. Click "Trigger DAG" — DB starts automatically if not running
 
 ![Airflow DAG List](images/airflow-dag-list.png)
 
 The DAG manages the full lifecycle:
 
-`start_db` → `noc_setup` → `scrape` → `download` → `validate` → `transform` → `load` → `stop_db`
+`ensure_db` → [`noc_setup` + `scrape`] → `download` → `validate` → `transform` → `load`
 
 ![Market Trend DAG Gantt](images/market-trend-dag-gantt.png)
+
+For pipeline details, see [pipelines/market-trend/SPEC.md](pipelines/market-trend/SPEC.md).
 
 ### Via CLI (standalone)
 
