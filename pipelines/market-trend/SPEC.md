@@ -58,41 +58,170 @@ https://open.canada.ca/data/en/dataset/ea639e28-c0fc-48bf-b5dd-b8899bd43072
 - Each downloaded file must be non-empty and readable as UTF-16 tab-separated CSV
 - Skip files already present in `data/raw/market-trend/` (idempotent re-runs)
 
-## Pipeline Stages
+## Architecture
 
-### Pre-requisite
-- `noc_titles` table must be populated from Statistics Canada master CSV before pipeline runs
+### DAG-Managed Pipeline
 
-### Pipeline Flow
+The pipeline runs as an Airflow DAG (`market_trend_dag.py`) that manages its own infrastructure.
+DB is NOT stopped after pipeline — data stays accessible for backend.
+
+```mermaid
+flowchart LR
+    subgraph infra ["Infrastructure (BashOperator)"]
+        ENSURE["ensure_db<br/>━━━━━━━━━━━<br/>Start pipeline DB<br/>if not running"]
+    end
+
+    subgraph extract ["Extract"]
+        NOC["noc_setup<br/>━━━━━━━━━━━<br/>516 NOC21 titles<br/>from Statistics Canada"]
+        SCRAPE["scrape<br/>━━━━━━━━━━━<br/>~38 CSV URLs<br/>from CKAN API"]
+    end
+
+    subgraph ingest ["Ingest"]
+        DL["download<br/>━━━━━━━━━━━<br/>Fetch monthly CSVs<br/>skip existing files"]
+        VAL["validate<br/>━━━━━━━━━━━<br/>Detect encoding<br/>verify columns"]
+    end
+
+    subgraph process ["Transform & Load"]
+        TX["transform<br/>━━━━━━━━━━━<br/>Salary normalize<br/>Outlier filter<br/>NOC mapping<br/>→ .parquet"]
+        LOAD["load<br/>━━━━━━━━━━━<br/>COPY bulk insert<br/>→ PostgreSQL"]
+    end
+
+    ENSURE --> NOC
+    ENSURE --> SCRAPE
+    SCRAPE --> DL --> VAL
+    NOC --> TX
+    VAL --> TX --> LOAD
+
+    style ENSURE fill:#607D8B,color:#fff
+    style NOC fill:#FF9800,color:#fff
+    style SCRAPE fill:#2196F3,color:#fff
+    style DL fill:#2196F3,color:#fff
+    style VAL fill:#2196F3,color:#fff
+    style TX fill:#9C27B0,color:#fff
+    style LOAD fill:#4CAF50,color:#fff
 ```
-1. SCRAPE    → Extract CSV download URLs from Open Data Portal
-2. DOWNLOAD  → Fetch monthly CSVs to data/raw/market-trend/
-3. VALIDATE  → Check file integrity (UTF-16, non-empty, expected columns)
-4. TRANSFORM → Salary normalization, outlier filtering, NOC21 code lookup
-5. LOAD      → Insert job_postings into PostgreSQL
+
+### Data Flow
+
+```mermaid
+flowchart LR
+    subgraph sources ["Data Sources"]
+        JB[("Canada Job Bank<br/>Open Data Portal<br/>━━━━━━━━━━━<br/>~44K rows/month<br/>CSV (mixed encoding)")]
+        SC[("Statistics Canada<br/>NOC 2021 v1.0<br/>━━━━━━━━━━━<br/>516 unit groups<br/>CSV")]
+    end
+
+    subgraph storage ["Local Storage"]
+        RAW["data/raw/market-trend/<br/>━━━━━━━━━━━<br/>YYYY-MM.csv<br/>(38+ files)"]
+        PROC["data/processed/market-trend/<br/>━━━━━━━━━━━<br/>YYYY-MM.parquet<br/>(cleaned + transformed)"]
+    end
+
+    subgraph db ["Pipeline DB (market-trend-db:5432)"]
+        NOC_T[("noc_titles<br/>━━━━━━━━━━━<br/>516 rows<br/>NOC21 codes")]
+        JP[("job_postings<br/>━━━━━━━━━━━<br/>~3.3M rows<br/>normalized data")]
+    end
+
+    JB -->|"scrape + download"| RAW
+    RAW -->|"validate + transform"| PROC
+    PROC -->|"COPY bulk insert"| JP
+    SC -->|"noc_setup"| NOC_T
+    NOC_T -.->|"FK lookup"| JP
+
+    style JB fill:#1565C0,color:#fff
+    style SC fill:#1565C0,color:#fff
+    style RAW fill:#F57F17,color:#fff
+    style PROC fill:#F57F17,color:#fff
+    style NOC_T fill:#2E7D32,color:#fff
+    style JP fill:#2E7D32,color:#fff
 ```
 
-## Input Schema
+### Execution Modes: CLI vs Airflow
 
-| Source Column | Type | Coverage | Description |
-|---|---|---|---|
-| `Job Title` | string | 100% | NOC-normalized job title (6,053 unique/month) |
-| `NOC21 Code` | string | 99.3% | 5-digit NOC 2021 classification code |
-| `NOC21 Code Name` | string | 99.3% | Official NOC21 occupation name |
-| `NOC 2016 Code` | string | - | Legacy NOC 2016 code |
-| `NOC 2016 Code Name` | string | - | Legacy NOC 2016 occupation name |
-| `Vacancy Count` | int | 100% | Number of positions per posting |
-| `First Posting Date` | date | 100% | Posting date (YYYY/MM/DD) |
-| `Salary Minimum` | numeric | 99.97% | Minimum salary (mixed units) |
-| `Salary Maximum` | numeric | 99.97% | Maximum salary (mixed units) |
-| `Salary Per` | string | 99.8% | Salary unit: Hour, Day, Week, Bi-weekly, Month, Year |
-| `Province/Territory` | string | 100% | 13 provinces/territories |
-| `City` | string | 99.2% | City name |
-| `Employment Type` | string | 96.8% | Full time, Part time, Part time leading to full time |
-| `NAICS` | string | 40.3% | Industry code (External=0 only) |
-| `Experience Level` | string | 40.3% | 7 levels (External=0 only) |
-| `Education LOS` | string | 40.3% | 11 levels (External=0 only) |
-| `External Indicator` | int | 100% | 0=Job Bank internal, 1=External employer |
+The same pipeline code runs in two modes with different data passing strategies:
+
+```mermaid
+flowchart LR
+    subgraph cli ["CLI Mode — py main.py"]
+        direction LR
+        C_SCRAPE["scrape"] --> C_DL["download<br/>→ CSV files"]
+        C_DL --> C_VAL["validate"]
+        C_VAL --> C_TX["transform<br/>━━━━━━━━━━━<br/>Returns DataFrame<br/>in memory"]
+        C_TX -->|"DataFrame<br/>(in memory)"| C_LOAD["load<br/>━━━━━━━━━━━<br/>COPY from<br/>DataFrame directly"]
+    end
+
+    subgraph airflow ["Airflow Mode — DAG"]
+        direction LR
+        A_SCRAPE["scrape"] --> A_DL["download<br/>→ CSV files"]
+        A_DL --> A_VAL["validate"]
+        A_VAL --> A_TX["transform<br/>━━━━━━━━━━━<br/>Saves .parquet<br/>to disk"]
+        A_TX -->|"file paths<br/>(via XCom)"| A_LOAD["load<br/>━━━━━━━━━━━<br/>Reads .parquet<br/>then COPY"]
+    end
+
+    style cli fill:#1B5E20,stroke:#4CAF50,color:#fff
+    style airflow fill:#0D47A1,stroke:#2196F3,color:#fff
+    style C_TX fill:#9C27B0,color:#fff
+    style C_LOAD fill:#4CAF50,color:#fff
+    style A_TX fill:#9C27B0,color:#fff
+    style A_LOAD fill:#4CAF50,color:#fff
+```
+
+| | CLI (`py main.py`) | Airflow (DAG) |
+|---|---|---|
+| **Data between stages** | In-memory DataFrame | `.parquet` files on disk |
+| **Why** | Single process — no serialization needed | Separate tasks — XCom can't pass DataFrames, only file paths |
+| **Intermediate files** | None | `data/processed/market-trend/*.parquet` |
+| **Infrastructure** | Manual: `./infra/up.sh postgres` | Automatic: `ensure_db` BashOperator |
+| **Pipeline code** | `pipelines/market-trend/src/` | Same code, imported by `dags/market_trend_dag.py` |
+
+### Schedule & Config
+
+| Setting | Value |
+|---------|-------|
+| Schedule | `@monthly` (manual trigger also supported) |
+| DAG file | `dags/market_trend_dag.py` |
+| Task API | TaskFlow (`@task` decorators) + BashOperator (infra) |
+| XCom data | File paths only (not DataFrames) |
+| `MANAGE_PIPELINE_DB=true` | `ensure_db` starts local Docker DB |
+| `MANAGE_PIPELINE_DB=false` | `ensure_db` is EmptyOperator (external DB like Neon) |
+| Standalone | `py main.py` still works independently without Airflow |
+
+## Infrastructure
+
+### Required Services
+
+| Service | Compose File | How it starts |
+|---------|-------------|---------------|
+| Airflow (webserver, scheduler, worker, init) | `docker-compose.airflow.yml` | Manual: `./infra/up.sh airflow` |
+| Airflow metadata DB (port 5433) | `docker-compose.airflow.yml` | Included with Airflow |
+| Redis (Celery broker) | `docker-compose.airflow.yml` | Included with Airflow |
+| Pipeline DB (port 5432) | `docker-compose.postgres.yml` | Automatic: DAG `ensure_db` task |
+
+Spark is **not used** by this stream. No `docker-compose.spark.yml` needed.
+
+### Configuration
+
+All settings are in `infra/config/.env.development`:
+
+```env
+# Pipeline DB
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=giljobi
+PIPELINE_DB_CONN=postgresql://postgres:postgres@market-trend-db:5432/giljobi
+MANAGE_PIPELINE_DB=true
+
+# Airflow
+AIRFLOW_WORKER_REPLICAS=1
+AIRFLOW_WORKER_MEMORY=2g
+```
+
+### Schema Initialization
+
+Pipeline DB schema is defined in `infra/init/01-market-trend.sql`. PostgreSQL Docker executes this automatically on first volume creation. For re-initialization:
+
+```bash
+./infra/down.sh postgres -v    # Delete volume
+./infra/up.sh postgres         # Fresh start with schema
+```
 
 ## Output Schema (Database)
 
