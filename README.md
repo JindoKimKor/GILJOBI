@@ -4,136 +4,126 @@
   <img src="giljobi.png" width="300">
 </p>
 
-A data engineering capstone project that analyzes job postings from major platforms (e.g., LinkedIn, Indeed) to provide career insights using Apache Spark and LLM-based data processing.
+A data engineering capstone project that processes job postings from Canada Job Bank and LinkedIn to provide career insights — market trends, salary distribution, and skill demand analysis.
 
-## 📋 Project Overview
+## Project Overview
 
-This platform processes historical job postings to help job seekers understand:
+This platform processes job postings from two data sources:
 
-- Market share by job role
-- Seniority distribution (Entry/Mid/Senior/Lead)
-- Top required skills per role
-- [Optional] Geographic distribution of opportunities
+- **Canada Job Bank Open Data** (~3.3M postings) — market trends, salary distribution, hiring locations, classified by NOC (National Occupational Classification) 2021
+- **LinkedIn/Kaggle Dataset** (~123K postings) — skill extraction, job title normalization using LLM
 
-**Key Innovation:** LLM-powered job title normalization that learns from actual data patterns, and multi-threading process using Apache Spark.
+DAG-managed modular infrastructure where Airflow orchestrates the entire data lifecycle — starting/stopping databases and Spark clusters as needed.
 
-## How To Start Containers
+## Architecture
 
-```bash
-docker compose up -d
+Only Airflow is started manually. DAGs manage all other infrastructure automatically.
+
+```mermaid
+flowchart LR
+    USER["👤 Developer<br/>./infra/up.sh airflow"]
+
+    subgraph ENGINE["Docker Engine"]
+        AIRFLOW["📁 Airflow<br/>Orchestration<br/>:8090"]
+        DB["📁 Pipeline DB<br/>PostgreSQL<br/>:5432"]
+        SPARK["📁 Spark + Livy<br/>Distributed Processing<br/>:8080 :8998"]
+        NET{{"giljobi-network"}}
+    end
+
+    USER -- "manual start" --> AIRFLOW
+    AIRFLOW -. "ensure_db<br/>(market-trend)" .-> DB
+    AIRFLOW -. "TBD<br/>(matching-insights)" .-> SPARK
+    AIRFLOW --- NET
+    DB --- NET
+    SPARK --- NET
+
+    style ENGINE fill:none,stroke:#888,stroke-width:2px,stroke-dasharray:5,color:#888
+    style AIRFLOW fill:#0D47A1,color:#fff
+    style DB fill:#BF360C,color:#fff
+    style SPARK fill:#4A148C,color:#fff
+    style NET fill:#1B5E20,stroke:#4CAF50,color:#fff
 ```
 
-## How To Run Pre-Processing Jobs on Airflow
+For detailed architecture, see [infra/SPEC.md](infra/SPEC.md).
 
-> Airflow/Spark/Livy containers should be up.
+### Two-Stream Pipeline
 
-1. Open Airflow UI at localhost
+| Stream | Source | Volume | Processing | Status |
+|--------|--------|--------|------------|--------|
+| **Market Trend** | Canada Job Bank Open Data | ~3.3M rows | Python + pandas | Completed |
+| **Matching Insights** | LinkedIn/Kaggle | ~123K rows | Spark + Claude LLM | Under Construction |
 
-```bash
-http://localhost:8090
+### Repo Structure
+
+```
+Giljobi-DataPipeline/
+├── dags/                          # Airflow DAGs (one per stream)
+│   ├── market_trend_dag.py
+│   └── matching_insights_preprocessing_dag.py
+├── pipelines/
+│   ├── market-trend/              # Job Bank ETL — SPEC / RUNBOOK
+│   └── matching-insights/         # LinkedIn pre-processing + LLM
+├── infra/                         # Modular infrastructure — SPEC
+└── data/                          # Local data (gitignored)
 ```
 
-![airflow_login](images/airflow_login.png)
-
-### Login credentials
-
-- Username: _airflow_
-- Password: _airflow_
-
-2. Select and run a DAG from the DAG list
-
-![dag_list](images/dag_list.png)
-
-3. Set `enable_partial_match` to enable partial matching in step 3
-
-![dag_param](images/dag_param.png)
-
-4. Monitor each step's progress in the **Graph** tab
-
-![dag_overview](images/dag_overview.png)
-
-## How To Run Pre-Processing Jobs on CLI
-
-> Spark containers should be up.
-
-1. Access the Spark master container
+## Quick Start
 
 ```bash
-docker exec -it spark-master bash
+# Start Airflow
+./infra/up.sh airflow
+
+# Open Airflow UI — trigger market_trend_pipeline DAG
+# http://localhost:8090 (airflow / airflow)
+
+# Stop
+./infra/down.sh
 ```
 
-2. Run python scripts for each processing step
+Configuration (replicas, memory, cores, credentials) is in `infra/config/.env.development`.
+
+## Market Trend Pipeline
+
+### Via Airflow (recommended)
+
+1. Start Airflow: `./infra/up.sh airflow`
+2. Open Airflow UI: http://localhost:8090
+3. Enable `market_trend_pipeline` DAG
+4. Click "Trigger DAG" — DB starts automatically if not running
+
+![Airflow DAG List](images/airflow-dag-list.png)
+
+The DAG manages the full lifecycle:
+
+`ensure_db` → [`noc_setup` + `scrape`] → `download` → `validate` → `transform` → `load`
+
+![Market Trend DAG Gantt](images/market-trend-dag-gantt.png)
+
+For pipeline details, see [pipelines/market-trend/SPEC.md](pipelines/market-trend/SPEC.md).
+
+### Via CLI (standalone)
 
 ```bash
-/opt/spark/bin/spark-submit /opt/spark/notebooks/<python-file>
+cd pipelines/market-trend
+py main.py                          # Full pipeline (local DB)
+py main.py --db "postgresql://..."  # Custom DB (e.g., Neon)
 ```
 
-- Example for Step 1:
+See [pipelines/market-trend/RUNBOOK.md](pipelines/market-trend/RUNBOOK.md) for full documentation.
 
-```bash
-/opt/spark/bin/spark-submit /opt/spark/notebooks/step1_select_colums.py
-```
+## Matching Insights Pipeline
 
-3. Convert parquet into csv (optional)
+> Under Construction — This stream is being restructured to integrate with the new modular infrastructure and DAG-managed Spark orchestration.
 
-```bash
-/opt/spark/bin/spark-submit /opt/spark/notebooks/parquet_to_csv.py --input /opt/spark/data/processed/step1_selected --output /opt/spark/data/processed/step1_selected/preview_csv_small
-```
-
-4. Upload parquet to SQL server
-
-```bash
-/opt/spark/bin/spark-submit \
-    --master spark://spark-master:7077 \
-    --jars /opt/spark/jars/custom/postgresql-42.7.1.jar \
-    /opt/spark/notebooks/upload_to_postgres.py \
-    --input /opt/spark/data/processed/<parquet_file> \
-    --mode append
-    --enable-partial-match
-```
-
-## 🎯 Core Features
-
-### Rule-Based Data Pre-Processing
-
-- Pre-process the dataset to extract senority and pre-normalize obvious titles, eventually to reduce LLM resources used.
-
-### Intelligent Title Normalization
-
-- Consolidates title variations using LLM
-  - "Software Engineer", "SWE", "SDE II" → "Software Engineer"
-  - "Backend Engineer", "Backend Developer" → "Backend Engineer"
-
-### Tag-based Classification
-
-- **Primary tags**: Base roles (e.g., "Software Engineer", "Data Scientist") using [O\*NET](https://www.onetonline.org/) job classification.
-- **Secondary tags**: Specializations (e.g., "Backend", "AI/ML", "Cloud")
-- Enables flexible querying: Find all "Software Engineer" roles OR all roles with "AI/ML" tag
-
-**Benefits:**
-
-- ✅ Scalable: LLM cost only for unique titles
-- ✅ Data-driven: Learns from actual job market
-- ✅ Fast: Production normalization uses simple lookups
-
-## 🛠️ Technology Stack
+## Technology Stack
 
 - **Data Processing**: Apache Spark (PySpark), Pandas
-- **LLM**: Claude API (development)
-- **Storage**: SQLite (development), PostgreSQL (planned)
+- **LLM**: Claude API (job title normalization)
+- **Orchestration**: Apache Airflow (CeleryExecutor)
+- **Storage**: PostgreSQL (Neon DB for production), Docker volumes
+- **Infrastructure**: Docker Compose (modular), Docker-in-Docker (DAG-managed)
 - **Languages**: Python 3
-- **Environment**: Docker, Git & GitHub
-
-## 🎓 Learning Outcomes
-
-This project demonstrates:
-
-- **Large-scale data processing** with Apache Spark on 120K+ records
-- **LLM integration** for intelligent data normalization
-- **Production-grade ETL pipelines** with clear separation of concerns
-- **Trade-offs**: Balancing accuracy vs. efficiency (LLM vs. rule-based approaches)
-- **Real-world problem solving**: Handling messy data, inconsistent naming, and scalability
 
 ---
 
-**Team**: 3 members | **Timeline**: 4 months | **Status**: 🚧 Active Development
+**Team**: 3 members | **Timeline**: 4 months | **Status**: Active Development
