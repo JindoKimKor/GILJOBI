@@ -174,7 +174,8 @@ Then re-run the pipeline as normal.
 ## 6. Running via Airflow
 
 The pipeline can also be orchestrated by Airflow for scheduled runs and visual monitoring.
-The DAG automatically manages infrastructure — it starts and stops the pipeline database as needed.
+The DAG automatically manages infrastructure — it starts the pipeline database if not already running.
+The DB is **not stopped** after the pipeline — data stays accessible for backend/frontend.
 
 ### Start Airflow
 
@@ -183,11 +184,12 @@ The DAG automatically manages infrastructure — it starts and stops the pipelin
 ```
 
 That's it. The DAG handles the rest:
-- `start_db` — spins up the pipeline PostgreSQL container
-- `noc_setup → scrape → download → validate → transform → load` — runs the pipeline
-- `stop_db` — tears down the pipeline PostgreSQL container
+- `ensure_db` — starts pipeline PostgreSQL if not running (idempotent — safe to re-trigger)
+- `noc_setup` + `scrape` — run in parallel after DB is confirmed
+- `download → validate → transform → load` — sequential ETL stages
 
 For external DB (e.g., Neon), set `MANAGE_PIPELINE_DB=false` in `infra/config/.env.development`.
+When set to `false`, `ensure_db` becomes a no-op (EmptyOperator).
 
 ### Configuration
 
