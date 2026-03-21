@@ -17,21 +17,21 @@ pip install pandas psycopg2
 
 ### Option A — Local Docker (default)
 
-Start only the PostgreSQL container — `docker-compose.yml` includes Airflow/Spark/Livy, but only Postgres is needed for the pipeline.
+Start only the PostgreSQL container using the modular infrastructure scripts:
 
 ```bash
-docker compose -f infra/docker-compose.yml up postgres -d
+./infra/up.sh postgres
 ```
 
 - Host: `localhost:5432`
 - DB: `giljobi`
 - User/Password: `postgres / postgres`
-- Schema is auto-applied from `infra/init.sql` on first run
+- Schema is auto-applied from `infra/init/01-market-trend.sql` on first run
 
 To fully reset (delete containers + volume):
 
 ```bash
-docker compose -f infra/docker-compose.yml down -v
+./infra/down.sh postgres -v
 ```
 
 ### Option B — Neon DB (remote)
@@ -46,10 +46,10 @@ Schema setup (first time only):
 
 ```bash
 # If psql is installed
-psql "postgresql://username:password@host.neon.tech/dbname?sslmode=require" -f infra/init.sql
+psql "postgresql://username:password@host.neon.tech/dbname?sslmode=require" -f infra/init/01-market-trend.sql
 
 # If psql is not installed — use Docker postgres container as client
-docker exec -i postgres psql "postgresql://username:password@host.neon.tech/dbname?sslmode=require" < infra/init.sql
+docker exec -i postgres psql "postgresql://username:password@host.neon.tech/dbname?sslmode=require" < infra/init/01-market-trend.sql
 ```
 
 ---
@@ -161,21 +161,82 @@ To do a full reload, truncate first then re-run:
 
 ```bash
 # Local Docker
-docker exec postgres psql -U postgres -d giljobi -c "TRUNCATE job_postings, noc_titles RESTART IDENTITY CASCADE;"
+docker exec market-trend-db psql -U postgres -d giljobi -c "TRUNCATE job_postings, noc_titles RESTART IDENTITY CASCADE;"
 
 # Neon DB
-docker exec postgres psql "postgresql://username:password@host.neon.tech/dbname?sslmode=require" -c "TRUNCATE job_postings, noc_titles RESTART IDENTITY CASCADE;"
+docker exec market-trend-db psql "postgresql://username:password@host.neon.tech/dbname?sslmode=require" -c "TRUNCATE job_postings, noc_titles RESTART IDENTITY CASCADE;"
 ```
 
 Then re-run the pipeline as normal.
 
 ---
 
-## 6. Data Location
+## 6. Running via Airflow
+
+The pipeline can also be orchestrated by Airflow for scheduled runs and visual monitoring.
+The DAG automatically manages infrastructure — it starts the pipeline database if not already running.
+The DB is **not stopped** after the pipeline — data stays accessible for backend/frontend.
+
+### Start Airflow
+
+```bash
+./infra/up.sh airflow
+```
+
+That's it. The DAG handles the rest:
+- `ensure_db` — starts pipeline PostgreSQL if not running (idempotent — safe to re-trigger)
+- `noc_setup` + `scrape` — run in parallel after DB is confirmed
+- `download → validate → transform → load` — sequential ETL stages
+
+For external DB (e.g., Neon), set `MANAGE_PIPELINE_DB=false` in `infra/config/.env.development`.
+When set to `false`, `ensure_db` becomes a no-op (EmptyOperator).
+
+### Configuration
+
+All settings (replicas, memory, cores, credentials) are in `infra/config/`:
+
+```bash
+infra/config/.env.development   # Local development defaults
+infra/config/.env.production    # Production settings
+infra/config/.env.example       # Template
+```
+
+Active config is copied to `infra/.env` on first run. To switch environments:
+
+```bash
+cp infra/config/.env.production infra/.env
+```
+
+### Stop infrastructure
+
+```bash
+./infra/down.sh                  # Stop all
+./infra/down.sh airflow          # Stop Airflow only
+./infra/down.sh -v               # Stop all + remove volumes
+```
+
+### Access UI
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Airflow | http://localhost:8090 | airflow / airflow |
+
+### Trigger the pipeline
+
+1. Open Airflow UI at http://localhost:8090
+2. Enable `market_trend_pipeline` DAG (toggle unpause)
+3. Click "Trigger DAG" to run manually, or wait for `@monthly` schedule
+4. Monitor in Graph view — all tasks show success/failure in real-time
+5. Check Gantt view for per-task timing breakdown
+
+---
+
+## 7. Data Location
 
 | Type | Path |
 |---|---|
 | Raw CSVs | `data/raw/market-trend/YYYY-MM.csv` |
 | Pipeline source | `pipelines/market-trend/` |
-| DB schema | `infra/init.sql` |
+| DB schema | `infra/init/01-market-trend.sql` |
+| Airflow DAG | `dags/market_trend_dag.py` |
 | Pipeline spec | `pipelines/market-trend/SPEC.md` |

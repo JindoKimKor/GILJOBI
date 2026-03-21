@@ -1,0 +1,204 @@
+# =============================================================================
+# docker-compose.airflow.yml
+# -----------------------------------------------------------------------------
+# Purpose : Apache Airflow workflow orchestration (CeleryExecutor)
+# Module  : airflow
+#
+# Includes its own PostgreSQL (airflow-db) for metadata storage.
+# This is separate from the pipeline data DB in docker-compose.postgres.yml.
+#
+# Usage:
+#   ./up.sh airflow
+#
+# Services:
+#   airflow-db        : PostgreSQL for Airflow metadata (port 5433)
+#   redis             : Celery message broker
+#   airflow-webserver : DAG UI + REST API  (http://localhost:8090)
+#   airflow-scheduler : Reads DAGs, schedules and dispatches tasks
+#   airflow-worker    : Executes tasks (replicas from config)
+#   airflow-init      : One-shot DB migration + admin user creation
+#
+# Config values read from .env (symlinked from config/)
+# DAGs mounted from ../dags/ — each stream adds its own DAG file (OCP).
+# DAGs manage pipeline infrastructure (postgres, spark) via up.sh/down.sh.
+# Login: ${AIRFLOW_ADMIN_USER} / ${AIRFLOW_ADMIN_PASSWORD}
+# =============================================================================
+
+x-airflow-common: &airflow-common
+  build: ./airflow
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-db/${AIRFLOW_DB_NAME}
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-db/${AIRFLOW_DB_NAME}
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW__WEBSERVER__WEB_SERVER_PORT: 8090
+    AIRFLOW__WEBSERVER__BASE_URL: http://localhost:8090
+    # Pipeline config — passed to DAG tasks
+    PIPELINE_DB_CONN: ${PIPELINE_DB_CONN}
+    MANAGE_PIPELINE_DB: ${MANAGE_PIPELINE_DB:-true}
+    MANAGE_SPARK: ${MANAGE_SPARK:-true}
+    # Host path for Docker-in-Docker volume mounts (init scripts, etc.)
+    INFRA_HOST_PATH: ${INFRA_HOST_PATH}
+  volumes:
+    - ../dags:/opt/airflow/dags                  # Centralized DAG folder (OCP)
+    - ./logs:/opt/airflow/logs                   # Airflow logs (gitignored)
+    - ../pipelines:/opt/airflow/pipelines        # All stream code
+    - ../data:/opt/airflow/data                  # Shared data directory
+    - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for infra control
+    - .:/opt/airflow/infra                       # up.sh/down.sh + compose files
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    airflow-db:
+      condition: service_healthy
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Airflow Metadata DB — PostgreSQL
+  # Internal database for Airflow metadata (DAG state, task history, users).
+  # NOT the pipeline data DB — that is managed by docker-compose.postgres.yml.
+  # Port 5433 to avoid conflict with pipeline DB on 5432.
+  # ---------------------------------------------------------------------------
+  airflow-db:
+    image: postgres:17
+    container_name: airflow-db
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME}
+    expose:
+      - 5432
+    ports:
+      - "5433:5432"
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${AIRFLOW_DB_USER}"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # Messaging — Redis
+  # Celery message broker for distributing Airflow tasks to workers.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:latest
+    container_name: giljobi-redis
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # Airflow Webserver
+  # DAG UI and REST API — http://localhost:8090
+  # ---------------------------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # Airflow Scheduler
+  # Reads DAGs, schedules tasks, dispatches to Celery workers.
+  # ---------------------------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # Airflow Worker (Celery)
+  # Executes DAG tasks. Replicas and memory configured via .env.
+  # ---------------------------------------------------------------------------
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      DUMB_INIT_SETSID: "0"
+    deploy:
+      replicas: ${AIRFLOW_WORKER_REPLICAS:-1}
+      resources:
+        limits:
+          memory: ${AIRFLOW_WORKER_MEMORY:-2g}
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # Airflow Init
+  # One-shot service: DB migration + admin user creation.
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /sources/logs /sources/dags
+        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags}
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-airflow}
+    user: "0:0"
+    volumes:
+      - ./:/sources
+
+networks:
+  default:
+    name: giljobi-network
+    external: true
+
+volumes:
+  airflow_db_data:

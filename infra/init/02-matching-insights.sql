@@ -1,0 +1,2 @@
+-- Matching Insights Stream: LinkedIn/O*NET data tables
+-- Placeholder: tables will be defined when stream is integrated

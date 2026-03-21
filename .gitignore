@@ -8,7 +8,13 @@ __pycache__/
 *$py.class
 
 data/raw/
-data/processed/step*
+data/processed/
+
+# Airflow logs (generated at runtime)
+infra/logs/
+
+# Active environment config (symlink to config/.env.{environment})
+infra/.env
 
 # LLM normalization test — data files (CSV outputs, checkpoints) are too large for GitHub
 # Code files (.py, .ipynb) are tracked; data is not.
