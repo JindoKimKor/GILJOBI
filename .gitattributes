@@ -1,1 +1,4 @@
 *.csv filter=lfs diff=lfs merge=lfs -text
+
+# Shell scripts must use LF on all platforms
+*.sh text eol=lf
