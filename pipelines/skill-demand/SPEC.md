@@ -439,3 +439,61 @@ LIMIT 20;
 | LLM invocation        | Claude CLI subprocess                            | Subscription-based; same proven pattern as existing phase3 mapping code                          |
 | Spark UDF             | Steps 2, 3, 4                                    | Distributes encoding/LLM calls across workers for scale                                          |
 | Checkpointing         | Per-batch JSON files                             | Resume interrupted LLM processing without restarting from scratch                                |
+
+## Roadmap
+
+### Phase 1: Pipeline 완성 (현재)
+
+로컬 Docker Compose 환경에서 전체 파이프라인 구현.
+
+| Step | 파일 | 상태 | 설명 |
+|------|------|------|------|
+| Download | `src/download.py` | ✅ 완료 | Kaggle API curl + unzip, idempotent |
+| V1 | `src/validators/v1_download.py` | ✅ 완료 | 파일 존재, 컬럼 검증, row count |
+| Step 1 | `src/step1_select_columns.py` | ✅ 완료 | job_id, company_name, title, description 추출 + parquet 저장 |
+| V2 | `src/validators/v2_extract.py` | 🔲 다음 | null, 중복 제거, description min length |
+| Step 2 | `src/step2_noc_normalize.py` | 🔲 | Sentence Transformers cosine similarity → NOC match |
+| V3 | `src/validators/v3_normalize.py` | 🔲 | threshold gate, match rate check |
+| Step 3 | `src/step3_noc_llm_fallback.py` | 🔲 | Claude Haiku CLI → sub-threshold NOC match |
+| V4 | `src/validators/v4_fallback.py` | 🔲 | NOC mapping completion rate |
+| Step 4 | `src/step4_extract.py` | 🔲 | Claude Haiku → seniority + skills[] 추출 |
+| V5 | `src/validators/v5_enrich.py` | 🔲 | seniority enum check, skills 비어있지 않은지 |
+| Step 5 | `src/step5_load.py` | 🔲 | jd_postings + jd_skills bulk insert |
+| DAG | `dags/skill_demand_dag.py` | 🔲 | Airflow DAG (LivyOperator) |
+| main.py | `main.py` | ✅ 완료 | CLI orchestrator (pandas, 로컬 테스트용) |
+
+TDD 패턴: `test first (RED) → code (GREEN)` — 각 step마다 테스트 먼저 작성.
+
+테스트 현황: 25 tests passing (download 5 + step1 13 + v1 7)
+
+### Phase 2: AWS 배포 (Terraform)
+
+AWS Academy Learner Lab 환경에 배포. Terraform으로 인프라 코드화.
+
+| 항목 | 로컬 | AWS |
+|------|------|-----|
+| Airflow | Docker Compose | EC2 + Docker Compose |
+| Spark + Livy | Docker Compose | EMR (Livy 내장) |
+| Data storage | 로컬 파일 | S3 |
+| Infra 관리 | `up.sh` / `down.sh` | `terraform apply` / `terraform destroy` |
+
+핵심: 데이터는 S3에 영속, 인프라는 일회용 (세션마다 recreate).
+
+Terraform 구조: `infra/aws/` — `emr.tf`, `ec2-airflow.tf`, `s3.tf`, `security-groups.tf`
+
+참고 문서:
+- `resources/Giljobi-Project/resources/datapipeline/aws-deployment-options.md`
+- `resources/Giljobi-Project/resources/datapipeline/spark-job-submission-comparison.md`
+
+### Phase 3: market-trend Spark 전환
+
+Phase 1에서 확립된 Spark 패턴을 market-trend pipeline에 적용.
+
+| 변경 | Before (pandas) | After (PySpark) |
+|------|----------------|-----------------|
+| Transform | `pandas.read_csv()` + apply | `spark.read.csv()` + UDF + Broadcast Join |
+| Load | psycopg2 COPY | Spark JDBC write |
+| NOC mapping | dict lookup | Broadcast Join |
+| DAG | `@task` decorator | LivyOperator |
+
+market-trend SPEC.md에 Spark Features 섹션 이미 추가됨 — 구현만 하면 됨.
