@@ -60,10 +60,18 @@ with DAG(
     tags=["skill-demand", "etl", "llm", "spark"],
     default_args=default_args,
     params={
+        # LLM rate limiting
         "batch_size": Param(10, type="integer", description="JDs per LLM call"),
         "batch_delay_sec": Param(5, type="integer", description="Seconds between LLM batches"),
         "max_batches_per_run": Param(50, type="integer", description="Max batches before stopping (checkpoint resume)"),
+        # NOC matching
         "noc_threshold": Param(0.75, type="number", description="Sentence Transformers cosine similarity threshold"),
+        # Spark resources — Step 2 (Sentence Transformers, memory-heavy)
+        "step2_executor_memory": Param("2g", type="string", description="Step 2 executor memory (model loading)"),
+        "step2_executor_instances": Param(2, type="integer", description="Step 2 executor count"),
+        # Spark resources — Step 3+4 (LLM calls, IO-heavy)
+        "step3_4_executor_memory": Param("1g", type="string", description="Step 3+4 executor memory"),
+        "step3_4_executor_instances": Param(2, type="integer", description="Step 3+4 executor count"),
     },
     doc_md="""
     ## Skill Demand Pipeline
@@ -193,10 +201,12 @@ with DAG(
     step2_noc = LivyOperator(
         task_id="step2_noc_normalize",
         file="/opt/spark/pipelines/skill-demand/spark/step2_noc_spark.py",
+        args=["--threshold", "{{ params.noc_threshold }}"],
         livy_conn_id="livy_default",
         polling_interval=15,
         conf={
-            "spark.executor.memory": "2g",
+            "spark.executor.memory": "{{ params.step2_executor_memory }}",
+            "spark.executor.instances": "{{ params.step2_executor_instances }}",
             "spark.driver.memory": "2g",
         },
     )
@@ -226,10 +236,16 @@ with DAG(
     step3_4_llm = LivyOperator(
         task_id="step3_4_llm_batch",
         file="/opt/spark/pipelines/skill-demand/spark/step3_4_llm_spark.py",
+        args=[
+            "--batch-size", "{{ params.batch_size }}",
+            "--batch-delay", "{{ params.batch_delay_sec }}",
+            "--max-batches", "{{ params.max_batches_per_run }}",
+        ],
         livy_conn_id="livy_default",
         polling_interval=30,
         conf={
-            "spark.executor.memory": "2g",
+            "spark.executor.memory": "{{ params.step3_4_executor_memory }}",
+            "spark.executor.instances": "{{ params.step3_4_executor_instances }}",
             "spark.driver.memory": "2g",
         },
     )
