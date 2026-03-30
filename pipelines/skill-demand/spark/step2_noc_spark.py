@@ -97,53 +97,84 @@ unmatched_count = spark.sparkContext.accumulator(0)
 # =============================================================================
 # mapPartitions — encode job titles + cosine similarity
 # =============================================================================
+PROGRESS_DIR = os.path.join(args.output, "progress")
+# Clean previous progress files
+import shutil
+if os.path.exists(PROGRESS_DIR):
+    shutil.rmtree(PROGRESS_DIR)
+os.makedirs(PROGRESS_DIR, exist_ok=True)
+
+ENCODE_CHUNK_SIZE = 1000  # encode + match in chunks for progress reporting
+
 def match_partition(rows):
     """Encode job titles and match against broadcasted NOC embeddings."""
     from sentence_transformers import SentenceTransformer
     import numpy as np
+    import json
+    from pathlib import Path
 
     rows_list = list(rows)
     if not rows_list:
         return
 
-    # Load model on each worker (cached after first call)
-    worker_model = SentenceTransformer("all-MiniLM-L6-v2")
+    partition_id = rows_list[0]["job_id"]
+    progress_file = Path(f"/opt/spark/data/processed/skill-demand/step2/progress/part_{partition_id}.json")
+    progress_file.parent.mkdir(parents=True, exist_ok=True)
 
-    titles = [row["title"] for row in rows_list]
-    title_embeddings = worker_model.encode(titles, normalize_embeddings=True)
+    # Load model on each worker
+    worker_model = SentenceTransformer("all-MiniLM-L6-v2")
 
     noc_emb = noc_emb_broadcast.value
     noc_id_list = noc_ids_broadcast.value
 
-    # Cosine similarity (normalized vectors → dot product = cosine sim)
-    sim_matrix = title_embeddings @ noc_emb.T
+    matched = 0
+    unmatched = 0
+    processed = 0
+    total_in_partition = len(rows_list)
 
-    for i, row in enumerate(rows_list):
-        best_idx = int(np.argmax(sim_matrix[i]))
-        best_score = float(sim_matrix[i][best_idx])
+    # Process in chunks for progress updates
+    for chunk_start in range(0, total_in_partition, ENCODE_CHUNK_SIZE):
+        chunk_end = min(chunk_start + ENCODE_CHUNK_SIZE, total_in_partition)
+        chunk_rows = rows_list[chunk_start:chunk_end]
 
-        if best_score >= threshold:
-            matched_count.add(1)
-            yield {
-                "job_id": row["job_id"],
-                "company_name": row["company_name"],
-                "title": row["title"],
-                "description": row["description"],
-                "noc_id": noc_id_list[best_idx],
-                "noc_match_score": round(best_score, 4),
-                "noc_match_method": "sentence_transformer",
-            }
-        else:
-            unmatched_count.add(1)
-            yield {
-                "job_id": row["job_id"],
-                "company_name": row["company_name"],
-                "title": row["title"],
-                "description": row["description"],
-                "noc_id": None,
-                "noc_match_score": round(best_score, 4),
-                "noc_match_method": None,
-            }
+        titles = [row["title"] for row in chunk_rows]
+        title_embeddings = worker_model.encode(titles, normalize_embeddings=True)
+        sim_matrix = title_embeddings @ noc_emb.T
+
+        for i, row in enumerate(chunk_rows):
+            best_idx = int(np.argmax(sim_matrix[i]))
+            best_score = float(sim_matrix[i][best_idx])
+
+            if best_score >= threshold:
+                matched_count.add(1)
+                matched += 1
+                yield {
+                    "job_id": row["job_id"],
+                    "company_name": row["company_name"],
+                    "title": row["title"],
+                    "description": row["description"],
+                    "noc_id": noc_id_list[best_idx],
+                    "noc_match_score": round(best_score, 4),
+                    "noc_match_method": "sentence_transformer",
+                }
+            else:
+                unmatched_count.add(1)
+                unmatched += 1
+                yield {
+                    "job_id": row["job_id"],
+                    "company_name": row["company_name"],
+                    "title": row["title"],
+                    "description": row["description"],
+                    "noc_id": None,
+                    "noc_match_score": round(best_score, 4),
+                    "noc_match_method": None,
+                }
+
+        processed += len(chunk_rows)
+
+        # Update progress file after each chunk
+        with open(progress_file, "w") as f:
+            json.dump({"rows": processed, "total": total_in_partition, "matched": matched, "unmatched": unmatched}, f)
 
 # =============================================================================
 # Execute
@@ -153,22 +184,33 @@ import datetime
 print(f"[STEP 2] Starting NOC matching (threshold={threshold})...")
 start = datetime.datetime.now()
 
-# Progress monitor — prints accumulator values every 30s from a separate thread
+# Progress monitor — reads worker progress files every 15s from a separate thread
 import threading
+import json
+from pathlib import Path
 
 _progress_done = threading.Event()
+_progress_dir = Path(PROGRESS_DIR)
 
 def _progress_monitor():
     while not _progress_done.is_set():
         try:
-            m = matched_count.value
-            u = unmatched_count.value
-            total_done = m + u
+            total_done = 0
+            total_matched = 0
+            total_unmatched = 0
+            for pf in _progress_dir.glob("part_*.json"):
+                with open(pf) as f:
+                    data = json.load(f)
+                    total_done += data["rows"]
+                    total_matched += data["matched"]
+                    total_unmatched += data["unmatched"]
             if total_done > 0:
-                print(f"[STEP 2] Progress: {total_done}/{total_rows} ({total_done/total_rows*100:.1f}%) — matched: {m}, unmatched: {u}")
+                import sys
+                print(f"[STEP 2] Progress: {total_done}/{total_rows} ({total_done/total_rows*100:.1f}%) — matched: {total_matched}, unmatched: {total_unmatched}")
+                sys.stdout.flush()
         except Exception:
             pass
-        _progress_done.wait(30)
+        _progress_done.wait(15)
 
 monitor = threading.Thread(target=_progress_monitor, daemon=True)
 monitor.start()
