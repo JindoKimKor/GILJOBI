@@ -65,14 +65,16 @@ with DAG(
         "batch_delay_sec": Param(5, type="integer", description="Seconds between LLM batches"),
         "max_batches_per_session": Param(50, type="integer", description="Max batches per session window"),
         "session_cooldown_min": Param(300, type="integer", description="Minutes to wait for session reset after hitting limit"),
+        # Input (default: full dataset, change for testing)
+        "step1_input": Param("step1_extracted_sample.parquet", type="string", description="Step 1 output filename (use step1_extracted_sample.parquet for testing)"),
         # NOC matching
-        "noc_threshold": Param(0.7, type="number", description="Sentence Transformers cosine similarity threshold"),
+        "noc_threshold": Param(0.65, type="number", description="Sentence Transformers cosine similarity threshold"),
         # Spark resources — Step 2 (Sentence Transformers, memory-heavy)
         "step2_executor_memory": Param("2g", type="string", description="Step 2 executor memory (model loading)"),
         "step2_executor_instances": Param(4, type="integer", description="Step 2 executor count"),
         # Spark resources — Step 3+4 (LLM calls, IO-heavy)
-        "step3_4_executor_memory": Param("0.5g", type="string", description="Step 3+4 executor memory"),
-        "step3_4_executor_instances": Param(16, type="integer", description="Step 3+4 executor count"),
+        "step3_4_executor_memory": Param("512m", type="string", description="Step 3+4 executor memory"),
+        "step3_4_executor_instances": Param(4, type="integer", description="Step 3+4 executor count"),
     },
     doc_md="""
     ## Skill Demand Pipeline
@@ -280,7 +282,10 @@ with DAG(
 
         batch_id = hook.post_batch(
             file="/opt/spark/pipelines/skill-demand/spark/step2_noc_spark.py",
-            args=["--threshold", str(params["noc_threshold"])],
+            args=[
+                "--threshold", str(params["noc_threshold"]),
+                "--input", f"/opt/spark/data/processed/skill-demand/step1/{params['step1_input']}",
+            ],
             conf={
                 "spark.executor.memory": params["step2_executor_memory"],
                 "spark.executor.instances": str(params["step2_executor_instances"]),
@@ -359,12 +364,12 @@ with DAG(
         return stats
 
     # =========================================================================
-    # Step 3+4 — LLM Batch Pipeline (NOC fallback + seniority + skills)
+    # Step 3 — LLM Title Normalization (company-grouped) + ST re-match
     # =========================================================================
 
-    @task(task_id="step3_4_llm_batch")
-    def step3_4_llm(**context):
-        """Step 3+4: LLM batch pipeline (Spark/Livy with live logs)."""
+    @task(task_id="step3_title_normalize_llm")
+    def step3_title_normalize(**context):
+        """Step 3: LLM title normalize by company + ST NOC re-match (Spark/Livy)."""
         import time
         from airflow.providers.apache.livy.hooks.livy import LivyHook
 
@@ -372,12 +377,9 @@ with DAG(
         hook = LivyHook(livy_conn_id="livy_sd")
 
         batch_id = hook.post_batch(
-            file="/opt/spark/pipelines/skill-demand/spark/step3_4_llm_spark.py",
+            file="/opt/spark/pipelines/skill-demand/spark/step3_title_normalize_llm_spark.py",
             args=[
-                "--batch-size", str(params["batch_size"]),
                 "--batch-delay", str(params["batch_delay_sec"]),
-                "--max-batches-per-session", str(params["max_batches_per_session"]),
-                "--session-cooldown-min", str(params["session_cooldown_min"]),
             ],
             conf={
                 "spark.executor.memory": params["step3_4_executor_memory"],
@@ -385,10 +387,10 @@ with DAG(
                 "spark.driver.memory": "2g",
             },
         )
-        print(f"[STEP 3+4] Submitted batch {batch_id}")
+        print(f"[STEP 3] Submitted batch {batch_id}")
 
         log_offset = 0
-        checkpoint_dir = f"{PROCESSED_DIR}/step3_4/checkpoints"
+        progress_dir = f"{PROCESSED_DIR}/step3/progress"
         last_progress = ""
 
         while True:
@@ -409,13 +411,19 @@ with DAG(
             except Exception:
                 pass
 
-            # Read checkpoint files directly for progress
+            # Read progress files directly
             try:
+                import json as _json
                 from pathlib import Path
-                checkpoints = list(Path(checkpoint_dir).glob("batch_*.json"))
-                count = len(checkpoints)
-                if count > 0:
-                    msg = f"[STEP 3+4] Progress: {count} batches checkpointed"
+                total_rows = 0
+                total_matched = 0
+                for pf in Path(progress_dir).glob("*.json"):
+                    with open(pf) as f:
+                        data = _json.load(f)
+                        total_rows += data.get("rows", 0)
+                        total_matched += data.get("matched", 0)
+                if total_rows > 0:
+                    msg = f"[STEP 3] Progress: {total_rows} rows processed, {total_matched} NOC matched"
                     if msg != last_progress:
                         print(msg)
                         last_progress = msg
@@ -428,7 +436,7 @@ with DAG(
 
         state_str = str(state).lower()
         if "success" not in state_str:
-            raise Exception(f"Step 3+4 failed with state: {state}")
+            raise Exception(f"Step 3 failed with state: {state}")
 
     # =========================================================================
     # V4 — Post-Fallback Validation
@@ -440,7 +448,7 @@ with DAG(
         import pandas as pd
         from src.validators.v4_fallback import validate_fallback
 
-        df = pd.read_parquet(f"{PROCESSED_DIR}/step3_4/step3_4_enriched.parquet")
+        df = pd.read_parquet(f"{PROCESSED_DIR}/step3/step3_normalized.parquet")
         stats = validate_fallback(df)
 
         print(f"[V4] Completion rate: {stats['completion_rate']:.1%}")
@@ -531,7 +539,8 @@ with DAG(
     #   ensure_db → noc_setup → download → v1 → step1 → v2  (no Spark needed)
     #   → start_spark_cluster (Master + Livy)
     #   → start_spark_workers
-    #   → step2_noc → v3 → step3_4_llm → v4 → v5         (Spark jobs)
+    #   → step2_noc_match_st → v3                          (ST NOC matching)
+    #   → step3_title_normalize_llm → v4                   (LLM normalize + ST re-match)
     #   → stop_spark_workers                                (free worker resources)
     #   → step5_load                                        (DB only, no Spark)
     #   → stop_spark_cluster                                (cleanup)
@@ -544,9 +553,8 @@ with DAG(
     v2 = validate_v2(s1)
     s2 = step2_noc()
     v3 = validate_v3()
-    s3_4 = step3_4_llm()
+    s3 = step3_title_normalize()
     v4 = validate_v4()
-    v5 = validate_v5()
     s5 = step5_load()
 
     (
@@ -555,7 +563,7 @@ with DAG(
         >> start_spark_cluster
         >> start_spark_workers
         >> s2 >> v3
-        >> s3_4 >> v4 >> v5
+        >> s3 >> v4
         >> stop_spark_workers
         >> s5
         >> stop_spark_cluster
