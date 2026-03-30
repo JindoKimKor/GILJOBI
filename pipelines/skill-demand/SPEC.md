@@ -470,50 +470,81 @@ TDD 패턴: `test first (RED) → code (GREEN)` — 각 step마다 테스트 먼
 
 테스트 현황: 117 tests passing
 
-### Pipeline Redesign (결정됨, 구현 예정)
+### Pipeline Redesign (구현 중)
 
-**문제**: Step 2 (ST) threshold 0.70에서 16.7%만 매칭. 나머지 83%를 LLM fallback으로 개별 처리하면 103K LLM 호출 → 비용 과다.
+**문제**: Step 2 (ST) threshold 0.70에서 16.7%만 매칭. 나머지 83% (103K rows)를 개별 LLM 호출로 처리하면 비용 과다.
 
 **근본 원인**: raw title이 지저분해서 ST가 매칭 못 함. 예: "Unix Manager in Jersey City, NJ - 3 days a week onsite" → NOC 매칭 실패.
 
-**해결**: matching-insights phase3 패턴 적용 — LLM으로 title normalization 후 ST 재매칭.
+**해결**: LLM으로 title normalization → 정규화된 title로 ST 재매칭.
 
 **새 파이프라인 흐름**:
 ```
-현재:    step1 → step2 (raw title → NOC via ST) → step3 (LLM NOC fallback) → step4 (seniority+skills)
-변경:    step1 → step2 (raw title → NOC via ST, threshold 0.70)
-           → matched (20K): NOC 확정, step4로
-           → unmatched (103K):
-               step3_NEW (LLM title normalize, company별 batch) → ST 재매칭
-           → step4 (seniority + skills, 전체 124K)
-           → step5 (DB load)
+step1 (extract) → step2_noc_match_st (raw title → NOC, threshold 0.70)
+  → matched (20K): NOC 확정
+  → unmatched (103K): step3_title_normalize_llm → ST 재매칭
+→ merge (matched + normalized)
+→ step4 (seniority + skills)
+→ step5 (DB load)
 ```
 
-**LLM 호출 최적화 — Company별 Grouping**:
+#### Adaptive Batch Strategy — Company Size 기반 LLM 호출 최적화
 
-| 데이터 | 수량 |
-|--------|------|
-| Unmatched rows | 103,070 |
-| Unique (title, company) pairs | 81,565 |
-| **Unique companies** | **21,165** |
-| Avg titles per company | 3.9 |
+**Brute Force 비교**:
 
-**Company별로 묶어서 LLM 호출** — 같은 company의 titles를 한 번에 보냄:
+| 방식 | LLM Calls | 비고 |
+|------|-----------|------|
+| Row별 개별 호출 | 103,070 | unmatched row마다 1 call |
+| Unique (title, company) pair | 81,565 | 중복 title 제거 |
+| Unique title only | 66,419 | company 무시 |
+| Company별 1 call | 21,165 | company 수만큼 |
+| **Adaptive Batch** | **1,758** | **아래 전략** |
+
+Company size에 따라 배치 전략을 다르게 적용해서 brute force 103K 대비 **98% 감소**:
+
+| Company Size | Companies | Strategy | Titles/Call | LLM Calls |
+|---|---|---|---|---|
+| >=50 titles | 174 | 1 company per call, 50 titles/batch | ~50 | 451 |
+| 30-49 titles | 202 | 1 company per call | 30-49 | 202 |
+| 20-29 titles | 280 | 2 companies per call | 40-58 | 140 |
+| 10-19 titles | 819 | 3 companies per call | 30-57 | 273 |
+| 1-9 titles | 20,653 | Mixed batch, 40 titles/call | ~40 | 692 |
+| **Total** | **22,128** | | | **1,758** |
+
+**기존 21K calls → 1,758 calls (92% 감소)**
+
+**전략 근거**:
+- **>=50 titles**: 대기업 (Amazon 286, TEKsystems 395 등). 같은 company의 titles를 함께 보내면 LLM이 company 맥락으로 더 정확한 normalization 가능. 내부적으로 50개씩 batch.
+- **30-49 titles**: 1 call이면 끝나는 크기. company 맥락 유지.
+- **20-29 titles**: 2개 company를 합쳐도 40-58 titles → 1 call에 적당. company 구분 표시.
+- **10-19 titles**: 3개 company 합쳐서 30-57 titles. company 구분 표시.
+- **1-9 titles**: 20,653 companies (대부분 1-2 titles). Company 맥락이 크게 의미 없는 소규모 → title만 40개씩 묶어서 batch. Company name은 참고용으로 포함.
+
 ```
-"Company: Google. Normalize these job titles to standard NOC categories:
-- Software Engineer III
-- Staff SWE, Cloud Infrastructure
-- Senior Software Engineer, YouTube"
-→ 1 LLM call로 3개 처리
+# 대기업 (>=50): company 맥락 중요
+"Company: Amazon. Normalize these job titles:
+- SDE II, Alexa
+- Sr. TPM, AWS Infrastructure
+- Software Engineer, Kindle"
+
+# 소규모 (<10): mixed batch, company는 참고용
+"Normalize these job titles (company in parentheses):
+- Store Lead FT (Walmart)
+- RN ICU Night (Kaiser)
+- Admin Asst II (Deloitte)"
 ```
 
-**Spark 활용**: `repartition("company_name")` → 같은 company가 같은 worker에 모여서 병렬 처리.
+#### Spark Features 활용
 
-**예상 LLM 호출**: ~21K (company 수) vs 현재 81K (pair별) — **74% 감소**
+| Spark Feature | 적용 | 효과 |
+|---|---|---|
+| **repartition("company_name")** | Step 3 | 같은 company의 rows가 같은 worker에 모임 → company별 LLM call 가능 |
+| **mapPartitions + groupBy** | Step 3 | partition 내에서 company별 grouping → adaptive batch 전략 적용 |
+| **Broadcast Join** | Step 2, 3 | NOC 510개 벡터를 모든 worker에 복사 → shuffle 없이 cosine similarity |
+| **Checkpoint (per-company)** | Step 3 | company별 JSON checkpoint → 실패 시 resume, progress monitoring |
+| **Data-aware Partitioning** | Step 3 | company size에 따라 처리 방식 동적 변경 — Spark의 partition 특성을 활용한 adaptive processing |
 
-**추가 최적화 후보**:
-- Step 3 (title normalize) + Step 4 (seniority + skills)를 하나의 LLM 호출로 합치기
-- 큰 company (600+ titles)는 내부적으로 50개씩 batch
+이 설계는 **Data-aware Partitioning** 패턴 — 데이터 특성(company size)에 따라 partition 내에서 처리 전략을 동적으로 변경. Spark의 `repartition` + `mapPartitions`가 이걸 자연스럽게 가능하게 함.
 
 ### Phase 2: AWS 배포 (Terraform)
 
