@@ -31,9 +31,9 @@ parser.add_argument("--max-batches-per-session", type=int, default=50,
 parser.add_argument("--session-cooldown-min", type=int, default=60,
                     help="Minutes to wait for session reset after hitting limit")
 parser.add_argument("--input", type=str,
-                    default="/opt/airflow/data/processed/skill-demand/step2/step2_normalized.parquet")
+                    default="/opt/spark/data/processed/skill-demand/step2/step2_normalized.parquet")
 parser.add_argument("--output", type=str,
-                    default="/opt/airflow/data/processed/skill-demand/step3_4")
+                    default="/opt/spark/data/processed/skill-demand/step3_4")
 parser.add_argument("--db-conn", type=str,
                     default="postgresql://postgres:postgres@skill-demand-db:5432/giljobi_sd")
 args = parser.parse_args()
@@ -152,7 +152,7 @@ def process_partition(rows):
 
         # Check checkpoint
         checkpoint = Path(
-            f"/opt/airflow/data/processed/skill-demand/step3_4/checkpoints/batch_{batch_id}.json"
+            f"/opt/spark/data/processed/skill-demand/step3_4/checkpoints/batch_{batch_id}.json"
         )
         if checkpoint.exists():
             with open(checkpoint) as f:
@@ -172,7 +172,7 @@ def process_partition(rows):
 If none fit, return null.
 
 Job Title: {row['title']}
-Job Description: {str(row.get('description', ''))[:2000]}
+Job Description: {str((row["description"] or ""))[:2000]}
 
 Available NOC categories:
 {candidates_str}
@@ -192,7 +192,7 @@ Return JSON only: {{"noc_title": "matching category or null"}}"""
 1. seniority: one of [{tiers_str}]
 2. skills: list of technical skills (lowercase)
 
-Job Description: {str(row.get('description', ''))[:3000]}
+Job Description: {str((row["description"] or ""))[:3000]}
 
 Return JSON only: {{"seniority": "tier", "skills": ["skill1", "skill2"]}}"""
 
@@ -212,9 +212,9 @@ Return JSON only: {{"seniority": "tier", "skills": ["skill1", "skill2"]}}"""
                 "job_id": row["job_id"],
                 "company_name": row["company_name"],
                 "title": row["title"],
-                "description": row.get("description"),
+                "description": row["description"],
                 "noc_id": noc_id,
-                "noc_match_score": row.get("noc_match_score"),
+                "noc_match_score": row["noc_match_score"],
                 "noc_match_method": noc_method,
                 "seniority": seniority,
                 "skills": skills,
@@ -276,9 +276,29 @@ while True:
     session_start = datetime.datetime.now()
     print(f"  Start:          {session_start.strftime('%H:%M:%S')}")
 
+    # Progress monitor — counts checkpoint files every 30s
+    import threading
+
+    _progress_done = threading.Event()
+    session_target = pending_count
+
+    def _progress_monitor():
+        while not _progress_done.is_set():
+            try:
+                current = len(list(checkpoint_dir.glob("batch_*.json")))
+                elapsed = datetime.datetime.now() - session_start
+                print(f"  [PROGRESS] {current}/{total_batches} batches checkpointed ({elapsed})")
+            except Exception:
+                pass
+            _progress_done.wait(30)
+
+    monitor = threading.Thread(target=_progress_monitor, daemon=True)
+    monitor.start()
+
     result_rdd = df_spark.rdd.mapPartitions(process_partition)
     result_rdd.collect()
 
+    _progress_done.set()
     session_elapsed = datetime.datetime.now() - session_start
     session_number += 1
     print(f"  Elapsed:        {session_elapsed}")

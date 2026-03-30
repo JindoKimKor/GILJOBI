@@ -24,9 +24,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--threshold", type=float, default=0.75,
                     help="Cosine similarity threshold for NOC matching")
 parser.add_argument("--input", type=str,
-                    default="/opt/airflow/data/processed/skill-demand/step1/step1_extracted.parquet")
+                    default="/opt/spark/data/processed/skill-demand/step1/step1_extracted.parquet")
 parser.add_argument("--output", type=str,
-                    default="/opt/airflow/data/processed/skill-demand/step2")
+                    default="/opt/spark/data/processed/skill-demand/step2")
 parser.add_argument("--db-conn", type=str,
                     default="postgresql://postgres:postgres@skill-demand-db:5432/giljobi_sd")
 args = parser.parse_args()
@@ -34,6 +34,10 @@ args = parser.parse_args()
 # =============================================================================
 # SparkSession
 # =============================================================================
+import os
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+
 from pyspark.sql import SparkSession
 
 spark = SparkSession.builder \
@@ -52,7 +56,10 @@ import pandas as pd
 print(f"[STEP 2] Loading input: {args.input}")
 df = spark.read.parquet(args.input)
 total_rows = df.count()
-print(f"[STEP 2] {total_rows} rows loaded.")
+# Repartition to match worker count for parallel processing
+num_partitions = int(spark.conf.get("spark.executor.instances", "8"))
+df = df.repartition(num_partitions)
+print(f"[STEP 2] {total_rows} rows loaded, {num_partitions} partitions.")
 
 # Load NOC titles from DB
 print(f"[STEP 2] Loading NOC titles from DB...")
@@ -146,6 +153,26 @@ import datetime
 print(f"[STEP 2] Starting NOC matching (threshold={threshold})...")
 start = datetime.datetime.now()
 
+# Progress monitor — prints accumulator values every 30s from a separate thread
+import threading
+
+_progress_done = threading.Event()
+
+def _progress_monitor():
+    while not _progress_done.is_set():
+        try:
+            m = matched_count.value
+            u = unmatched_count.value
+            total_done = m + u
+            if total_done > 0:
+                print(f"[STEP 2] Progress: {total_done}/{total_rows} ({total_done/total_rows*100:.1f}%) — matched: {m}, unmatched: {u}")
+        except Exception:
+            pass
+        _progress_done.wait(30)
+
+monitor = threading.Thread(target=_progress_monitor, daemon=True)
+monitor.start()
+
 result_rdd = df.rdd.mapPartitions(match_partition)
 result_df = spark.createDataFrame(result_rdd)
 
@@ -154,6 +181,7 @@ os.makedirs(args.output, exist_ok=True)
 output_path = os.path.join(args.output, "step2_normalized.parquet")
 result_df.toPandas().to_parquet(output_path, index=False)
 
+_progress_done.set()
 elapsed = datetime.datetime.now() - start
 
 # =============================================================================
