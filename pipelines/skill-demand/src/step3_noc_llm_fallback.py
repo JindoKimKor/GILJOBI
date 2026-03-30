@@ -26,11 +26,6 @@ import pandas as pd
 LLM_MODEL = "haiku"
 CLAUDE_HOME = "/tmp"
 
-# Rate limiting — subscription session limit compliance
-BATCH_SIZE = 10              # JDs per LLM call
-BATCH_DELAY_SEC = 5          # seconds between batches
-MAX_BATCHES_PER_RUN = 50     # stop after N batches (resume via checkpoints)
-
 
 # =============================================================================
 # Claude CLI Environment

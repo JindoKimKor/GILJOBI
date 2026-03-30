@@ -18,9 +18,6 @@ from src.step4_extract import (
     extract_single_batch,
     SENIORITY_TIERS,
     LLM_MODEL,
-    BATCH_SIZE,
-    BATCH_DELAY_SEC,
-    MAX_BATCHES_PER_RUN,
 )
 
 
@@ -207,8 +204,5 @@ class TestConfig:
     def test_model_is_haiku(self):
         assert "haiku" in LLM_MODEL.lower()
 
-    def test_rate_limiting_shared_with_step3(self):
-        """Step 3 and Step 4 share the same rate limiting config values."""
-        assert BATCH_SIZE > 0
-        assert BATCH_DELAY_SEC >= 0
-        assert MAX_BATCHES_PER_RUN > 0
+    def test_model_is_haiku(self):
+        assert "haiku" in LLM_MODEL.lower()

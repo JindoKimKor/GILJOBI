@@ -21,11 +21,6 @@ from src.step3_noc_llm_fallback import build_claude_env, CLAUDE_HOME
 LLM_MODEL = "haiku"
 SENIORITY_TIERS = ["intern", "entry_level", "mid_level", "senior", "executive"]
 
-# Rate limiting — shared with step3
-BATCH_SIZE = 10
-BATCH_DELAY_SEC = 5
-MAX_BATCHES_PER_RUN = 50
-
 
 # =============================================================================
 # Prompt
