@@ -62,9 +62,10 @@ show_usage() {
     echo "Usage: ./up.sh <modules...> [--build|--no-cache]"
     echo ""
     echo "Modules:"
-    echo "  postgres    Pipeline data DB"
-    echo "  airflow     Airflow + Redis + metadata DB"
-    echo "  spark       Spark + Livy"
+    echo "  postgres       Pipeline data DB (market-trend)"
+    echo "  postgres-sd    Skill-demand DB (separate)"
+    echo "  airflow        Airflow + Redis + metadata DB"
+    echo "  spark          Spark + Livy"
     echo ""
     echo "Options:"
     echo "  --build      Rebuild images (use cached layers)"
@@ -88,7 +89,7 @@ fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        postgres|airflow|spark)
+        postgres|postgres-sd|airflow|spark)
             MODULES="$MODULES $1"
             shift
             ;;
@@ -148,9 +149,10 @@ if [ "$NO_CACHE" = "true" ]; then
     echo "Building images (no cache)..."
     for MODULE in $MODULES; do
         case "$MODULE" in
-            postgres) docker compose -p market-trend-db -f docker-compose.postgres.yml build --no-cache ;;
-            airflow)  docker compose -p giljobi-airflow -f docker-compose.airflow.yml build --no-cache ;;
-            spark)    docker compose -p giljobi-spark -f docker-compose.spark.yml build --no-cache ;;
+            postgres)    docker compose -p market-trend-db -f docker-compose.postgres.yml build --no-cache ;;
+            postgres-sd) docker compose -p skill-demand-db -f docker-compose.postgres-sd.yml build --no-cache ;;
+            airflow)     docker compose -p giljobi-airflow -f docker-compose.airflow.yml build --no-cache ;;
+            spark)       docker compose -p giljobi-spark -f docker-compose.spark.yml build --no-cache ;;
         esac
     done
 fi
@@ -160,7 +162,8 @@ fi
 # -----------------------------------------------------------------------------
 # Start each module with its own project name for Docker Desktop grouping:
 #   📁 giljobi-airflow       (airflow-db, redis, webserver, scheduler, worker)
-#   📁 market-trend-db   (postgres)
+#   📁 market-trend-db       (postgres — market-trend)
+#   📁 skill-demand-db       (postgres — skill-demand)
 #   📁 giljobi-spark         (spark-master, spark-worker, livy)
 # =============================================================================
 
@@ -171,8 +174,9 @@ echo "=============================="
 
 for MODULE in $MODULES; do
     case "$MODULE" in
-        postgres) docker compose -p market-trend-db -f docker-compose.postgres.yml up -d --wait $BUILD_FLAG ;;
-        airflow)  docker compose -p giljobi-airflow -f docker-compose.airflow.yml up -d --wait $BUILD_FLAG ;;
-        spark)    docker compose -p giljobi-spark -f docker-compose.spark.yml up -d --wait $BUILD_FLAG ;;
+        postgres)    docker compose -p market-trend-db -f docker-compose.postgres.yml up -d --wait $BUILD_FLAG ;;
+        postgres-sd) docker compose -p skill-demand-db -f docker-compose.postgres-sd.yml up -d --wait $BUILD_FLAG ;;
+        airflow)     docker compose -p giljobi-airflow -f docker-compose.airflow.yml up -d --wait $BUILD_FLAG ;;
+        spark)       docker compose -p giljobi-spark -f docker-compose.spark.yml up -d --wait $BUILD_FLAG ;;
     esac
 done

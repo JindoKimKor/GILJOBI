@@ -1,0 +1,46 @@
+# =============================================================================
+# docker-compose.postgres-sd.yml
+# -----------------------------------------------------------------------------
+# Purpose : Skill-demand pipeline database (separate from market-trend)
+# Module  : postgres-sd
+#
+# Usage:
+#   ./up.sh postgres-sd
+#
+# Notes:
+#   - Separate DB from market-trend (port 5434)
+#   - noc_titles populated independently by the pipeline
+#   - Schema created by main.py ensure_schema() or DAG step5_load
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 17 — Skill Demand DB
+  # Host: localhost:5434
+  # ---------------------------------------------------------------------------
+  postgres-sd:
+    image: postgres:17
+    container_name: skill-demand-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: giljobi_sd
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_sd_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+networks:
+  default:
+    name: giljobi-network
+    external: true
+
+volumes:
+  postgres_sd_data:
