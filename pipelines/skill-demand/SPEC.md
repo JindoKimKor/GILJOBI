@@ -489,13 +489,82 @@ Total NOC:          706 (97.9%)
 
 **최종 파이프라인 흐름**:
 ```
-step1 (extract) → step2_noc_match_st (raw title → NOC, threshold 0.65)
-  → matched: NOC 확정
-  → unmatched (103K): step3_title_normalize_llm → ST 재매칭
-→ merge (matched + normalized)
-→ step4 (seniority + skills)
+step1 (extract)
+→ step2_noc_match_st (raw title → NOC, threshold 0.65)
+    + seniority 추출 (formatted_experience_level + title keyword)
+→ step3 (unmatched → LLM NOC + seniority + skills 한 번에)
+→ step4 (matched from step2 → LLM skills만, seniority 없으면 추가)
+→ merge (step2 matched + step3 results + step4 results)
 → step5 (DB load)
 ```
+
+### Step 4 Redesign (계획, 구현 예정)
+
+**Seniority 추출 — 3단계 전략:**
+
+전체 데이터 기준 seniority 커버리지 분석:
+
+| 소스 | 커버리지 | 신뢰도 |
+|------|---------|--------|
+| `formatted_experience_level` (CSV 원본) | 94,440 (76.3%) | 중간 — LinkedIn 메타데이터 |
+| Title keyword 매칭 | 27,614 (22.3%) | 높음 — 타이틀에 명시 |
+| **둘 합치면** | **100,632 (81.3%)** | |
+| **LLM 필요 (나머지)** | **23,217 (18.7%)** | |
+
+`formatted_experience_level` 분포:
+```
+Mid-Senior level    41,489
+Entry level         36,708
+Associate            9,826
+Director             3,746
+Internship           1,449
+Executive            1,222
+Null                29,409
+```
+
+Title keyword 매칭 규칙:
+```
+intern:      intern, internship, co-op, coop
+entry_level: junior, jr, entry level, entry-level, graduate, trainee
+mid_level:   mid level, mid-level, intermediate
+senior:      senior, sr, lead, principal, staff
+executive:   director, vp, vice president, head of, chief, cto, ceo, cfo
+```
+
+**Seniority 적용 순서:**
+```
+1순위: formatted_experience_level 있으면 사용 (76.3%)
+2순위: title keyword 매칭 (추가 6.2%)
+3순위: LLM이 JD 읽고 판단 (나머지 18.7%)
+```
+
+**Skills 추출:**
+- Skills는 전체 row에서 JD 기반으로 LLM 추출 필요
+- seniority와 같은 LLM call에서 동시 추출 가능
+
+**Step 설계 (검토 중):**
+
+Option A: Step별 분리
+```
+Step 2: ST NOC 매칭 + seniority (keyword + formatted_experience_level)
+Step 3: unmatched → LLM (NOC + seniority + skills 한 번에)
+Step 4: matched → LLM (skills만, seniority 없으면 추가)
+```
+
+Option B: LLM 호출 통합
+```
+Step 2: ST NOC 매칭 + seniority (keyword + formatted_experience_level)
+Step 3: unmatched → LLM (NOC 한 번에) — 현재 구현
+Step 4: 전체 → LLM (skills + 남은 seniority) — adaptive batch 재활용
+```
+
+**핵심 결정 포인트:**
+- Step 3 (NOC)과 Step 4 (skills)를 같은 LLM call로 합칠 수 있는가?
+  - 합치면: unmatched에 대해 LLM 1번 (NOC + seniority + skills)
+  - 분리하면: Step 3 LLM (NOC), Step 4 LLM (skills) = 2번
+  - 근데 matched는 어차피 Step 4에서 skills만 별도 LLM 필요
+- `formatted_experience_level`을 Step 1에서 미리 가져올 것인가, Step 2에서 처리할 것인가
+- Adaptive Batch Strategy를 skills 추출에도 동일하게 적용할 것인가
 
 #### Adaptive Batch Strategy — Company Size 기반 LLM 호출 최적화
 
