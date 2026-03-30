@@ -20,9 +20,6 @@ from src.step3_noc_llm_fallback import (
     match_single_batch,
     build_claude_env,
     LLM_MODEL,
-    BATCH_SIZE,
-    BATCH_DELAY_SEC,
-    MAX_BATCHES_PER_RUN,
     CLAUDE_HOME,
 )
 
@@ -227,26 +224,9 @@ class TestMatchSingleBatch:
 
 
 # ============================================================
-# Rate Limiting Config
+# Config
 # ============================================================
 
-class TestRateLimitingConfig:
-    """Subscription session limit compliance."""
-
-    def test_batch_size_is_positive(self):
-        assert BATCH_SIZE > 0
-
-    def test_batch_delay_is_non_negative(self):
-        assert BATCH_DELAY_SEC >= 0
-
-    def test_max_batches_is_positive(self):
-        assert MAX_BATCHES_PER_RUN > 0
-
-    def test_batch_size_reasonable(self):
-        assert 1 <= BATCH_SIZE <= 100
-
-    def test_max_batches_limits_total_calls(self):
-        assert MAX_BATCHES_PER_RUN <= 500
-
+class TestConfig:
     def test_model_is_haiku(self):
         assert "haiku" in LLM_MODEL.lower()
