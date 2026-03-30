@@ -4,35 +4,34 @@
 
 ## Data Source
 
-| Property          | Value                                                                                                |
-| ----------------- | ---------------------------------------------------------------------------------------------------- |
-| Source            | [arshkon/linkedin-job-postings](https://www.kaggle.com/datasets/arshkon/linkedin-job-postings) (Kaggle) |
-| Format            | CSV (zip archive, 166.5MB compressed)                                                                |
-| Total Postings    | ~124,000                                                                                             |
-| Date Range        | 2023–2024                                                                                           |
-| License           | CC BY-SA 4.0                                                                                         |
-| Processing Engine | PySpark (Spark cluster)                                                                              |
-| Raw Data Location | `data/raw/skill-demand/`                                                                           |
+| Property | Value |
+|---|---|
+| Source | [arshkon/linkedin-job-postings](https://www.kaggle.com/datasets/arshkon/linkedin-job-postings) (Kaggle) |
+| Format | CSV (zip archive, 166.5MB compressed) |
+| Total Postings | ~124,000 |
+| Date Range | 2023–2024 |
+| License | CC BY-SA 4.0 |
+| Processing Engine | PySpark (Spark cluster) |
+| Raw Data Location | `data/raw/skill-demand/` |
 
 ### Key Files from Dataset
 
-| File                              | Columns Used                                                                                            | Purpose             |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------- |
-| `job_postings.csv`              | `job_id`, `title`, `description`, `company_id`, `formatted_experience_level`, `skills_desc` | Main pipeline input |
-| `company_details/companies.csv` | `company_id`, `name`                                                                                | Company name lookup |
+| File | Columns Used | Purpose |
+|------|-------------|---------|
+| `postings.csv` | `job_id`, `title`, `description`, `company_name`, `formatted_experience_level` | Main pipeline input |
 
-### Available Columns in `job_postings.csv`
+Note: `company_name` is already in `postings.csv` — no JOIN with `companies.csv` needed.
 
-| Column                                         | Type         | Pipeline Usage                                                      |
-| ---------------------------------------------- | ------------ | ------------------------------------------------------------------- |
-| `job_id`                                     | INT          | Primary key                                                         |
-| `title`                                      | TEXT         | NOC normalization input                                             |
-| `description`                                | TEXT         | LLM seniority + skill extraction input                              |
-| `company_id`                                 | INT          | FK →`companies.csv` for company name                             |
-| `formatted_experience_level`                 | TEXT         | Available but not used — LLM extraction from JD is more reliable   |
-| `skills_desc`                                | TEXT         | Available but not used — LLM extraction provides structured output |
-| `max_salary`, `min_salary`, `pay_period` | NUMERIC/TEXT | Not used in this stream                                             |
-| `location`                                   | TEXT         | Not used in this stream                                             |
+### Available Columns in `postings.csv`
+
+| Column | Type | Pipeline Usage |
+|--------|------|----------------|
+| `job_id` | INT | Primary key |
+| `title` | TEXT | ST NOC matching + seniority keyword extraction |
+| `description` | TEXT | LLM skills extraction input |
+| `company_name` | TEXT | LLM context for NOC matching |
+| `formatted_experience_level` | TEXT | Seniority 1st priority (76.3% filled) |
+| `skills_desc` | TEXT | Not used — LLM extracts structured skills from `description` |
 
 ### Download
 
@@ -44,204 +43,67 @@ curl -L -o /tmp/linkedin-job-postings.zip \
 unzip -o /tmp/linkedin-job-postings.zip -d data/raw/skill-demand/
 ```
 
-Requires Kaggle API credentials (`~/.kaggle/kaggle.json`).
+Requires Kaggle API credentials (`~/.kaggle/kaggle.json`). Skip if `postings.csv` already exists (idempotent).
 
 ## Architecture
 
-### DAG-Managed Pipeline
+### Pipeline Flow
 
-```mermaid
-flowchart TB
-    classDef process     fill:#dcfce7,stroke:#16a34a,color:#14532d
-    classDef resource    fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    classDef abstraction fill:#ede9fe,stroke:#7c3aed,color:#3b0764
-    classDef config      fill:#fef3c7,stroke:#d97706,color:#78350f
-    classDef rule        fill:#fce7f3,stroke:#db2777,color:#831843
-    classDef validate    fill:#fef9c3,stroke:#ca8a04,color:#713f12
-
-    %% ─── Data Sources ─────────────────────────────────────────
-    CSV_RAW[("«resource»<br/>LinkedIn CSV<br/>Kaggle 2023-2024<br/>~124K postings")]:::resource
-    NOC_REF[("«resource»<br/>NOC Titles<br/>510 unit groups<br/>5-digit codes")]:::resource
-
-    %% ─── Infrastructure ───────────────────────────────────────
-    subgraph Infrastructure["INFRASTRUCTURE"]
-        ENSURE_DB["«process»<br/>ensure_db<br/>━━━━━━━━━━━<br/>Start pipeline DB<br/>if not running"]:::process
-        ENSURE_SP["«process»<br/>ensure_spark<br/>━━━━━━━━━━━<br/>Start Spark cluster<br/>if not running"]:::process
-    end
-
-    %% ─── Prepare ──────────────────────────────────────────────
-    subgraph Prepare["PREPARE"]
-        DL["«process»<br/>download<br/>━━━━━━━━━━━<br/>Kaggle API<br/>curl + unzip<br/>→ data/raw/"]:::process
-        V1{{"«validate» V1<br/>━━━━━━━━━━━<br/>File integrity check<br/>Required columns exist<br/>(company, title, description)"}}:::validate
-    end
-
-    D_RAW[("«resource»<br/>Raw CSV<br/>data/raw/skill-demand/")]:::resource
-
-    %% ─── Extract ──────────────────────────────────────────────
-    subgraph Extract["EXTRACT"]
-        S1["«process»<br/>step1<br/>━━━━━━━━━━━<br/>Select columns<br/>company · title · description"]:::process
-        V2{{"«validate» V2<br/>━━━━━━━━━━━<br/>Null check<br/>Duplicate removal<br/>Description min length"}}:::validate
-    end
-
-    D_S1[("«resource»<br/>Step 1 Parquet<br/>3 columns · cleaned")]:::resource
-
-    %% ─── Transform: Normalize ─────────────────────────────────
-    subgraph Normalize["TRANSFORM: NORMALIZE"]
-        S2["«process»<br/>step2<br/>━━━━━━━━━━━<br/>NOC Normalize<br/>Sentence Transformers<br/>cosine similarity"]:::process
-        V3{{"«validate» V3<br/>━━━━━━━━━━━<br/>Threshold gate<br/>Match rate check<br/>Split: matched vs sub-threshold"}}:::validate
-        S3["«process»<br/>step3<br/>━━━━━━━━━━━<br/>NOC LLM Fallback<br/>Claude Haiku<br/>sub-threshold only"]:::process
-        V4{{"«validate» V4<br/>━━━━━━━━━━━<br/>NOC mapping completion rate<br/>Unmapped row count<br/>noc_id NOT NULL check"}}:::validate
-    end
-
-    A_ST(["«abstraction»<br/>Sentence Transformers<br/>all-MiniLM-L6-v2<br/>local · ~80MB"]):::abstraction
-    A_HAIKU_N(["«abstraction»<br/>Claude Haiku<br/>NOC matching via<br/>JD description"]):::abstraction
-    CF_THRESH["«config»<br/>threshold: TBD<br/>(0.7 or 0.8)"]:::config
-
-    D_MATCHED[("«resource»<br/>Matched Parquet<br/>+ noc_id · noc_match_score<br/>method: sentence_transformer")]:::resource
-    D_SUB[("«resource»<br/>Sub-threshold Parquet<br/>awaiting LLM fallback")]:::resource
-    D_NORMALIZED[("«resource»<br/>Normalized Parquet<br/>all rows with noc_id")]:::resource
-
-    %% ─── Transform: Enrich ────────────────────────────────────
-    subgraph Enrich["TRANSFORM: ENRICH"]
-        S4["«process»<br/>step4<br/>━━━━━━━━━━━<br/>Extract seniority<br/>+ tech skills<br/>from JD description"]:::process
-        V5{{"«validate» V5<br/>━━━━━━━━━━━<br/>Seniority value in allowed set<br/>Skills array not empty<br/>LLM parse error check"}}:::validate
-    end
-
-    A_HAIKU_E(["«abstraction»<br/>Claude Haiku<br/>single call per JD<br/>temp: 0"]):::abstraction
-    CF_SENIORITY["«config»<br/>seniority tiers:<br/>intern · entry_level<br/>mid_level · senior · executive"]:::config
-
-    D_ENRICHED[("«resource»<br/>Enriched Parquet<br/>+ seniority · skills[]")]:::resource
-
-    %% ─── Load ─────────────────────────────────────────────────
-    subgraph Load["LOAD"]
-        S5["«process»<br/>step5<br/>━━━━━━━━━━━<br/>Bulk insert<br/>jd_postings + jd_skills"]:::process
-    end
-
-    DB_POSTINGS[("«resource»<br/>jd_postings<br/>id · company · raw_title<br/>noc_id · noc_match_score<br/>noc_match_method<br/>seniority · description")]:::resource
-    DB_SKILLS[("«resource»<br/>jd_skills<br/>id · jd_id (FK) · skill")]:::resource
-    DB_VIEW[("«resource»<br/>skill_demand_summary<br/>VIEW<br/>NOC × seniority × skill<br/>→ demand_count")]:::resource
-
-    STOP["«process»<br/>stop_spark<br/>━━━━━━━━━━━<br/>Shut down<br/>Spark cluster"]:::process
-
-    %% ─── Execution Engine ─────────────────────────────────────
-    A_SPARK(["«abstraction»<br/>Apache Spark<br/>UDF distributed processing<br/>Steps 2, 3, 4"]):::abstraction
-
-    %% ─── Main Flow ────────────────────────────────────────────
-    ENSURE_DB --> ENSURE_SP
-    ENSURE_SP --> DL
-    CSV_RAW --> DL
-    DL --> V1
-    V1 --> D_RAW
-    D_RAW --> S1
-    S1 --> V2
-    V2 --> D_S1
-    D_S1 --> S2
-    NOC_REF --> S2
-    S2 --> V3
-    V3 -- "matched" --> D_MATCHED
-    V3 -- "sub-threshold" --> D_SUB
-    D_SUB --> S3
-    S3 --> D_MATCHED
-    D_MATCHED --> V4
-    V4 --> D_NORMALIZED
-    D_NORMALIZED --> S4
-    S4 --> V5
-    V5 --> D_ENRICHED
-    D_ENRICHED --> S5
-    S5 --> DB_POSTINGS
-    S5 --> DB_SKILLS
-    DB_POSTINGS --> DB_VIEW
-    DB_SKILLS --> DB_VIEW
-    S5 --> STOP
-
-    %% ─── Tool Connections (dotted) ────────────────────────────
-    A_ST -. "encode + cosine" .-> S2
-    A_HAIKU_N -. "JD → NOC" .-> S3
-    A_HAIKU_E -. "JD → seniority + skills" .-> S4
-    A_SPARK -. "distributed" .-> S2
-    A_SPARK -. "distributed" .-> S3
-    A_SPARK -. "distributed" .-> S4
-
-    %% ─── Config Connections (dotted) ──────────────────────────
-    CF_THRESH -.- V3
-    CF_SENIORITY -.- V5
-
-    %% ─── Link Styles ─────────────────────────────────────────
-    %% Infrastructure flow (gray)
-    linkStyle 0,1 stroke:#607D8B,stroke-width:2px
-
-    %% Main data flow (blue solid) - links 2~24
-    linkStyle 2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24 stroke:#3b82f6,stroke-width:2px
-
-    %% Tool connections (purple dotted) - links 25~30
-    linkStyle 25,26,27 stroke:#7c3aed,stroke-width:2px,stroke-dasharray:5
-    linkStyle 28,29,30 stroke:#0d9488,stroke-width:2px,stroke-dasharray:5
-
-    %% Config connections (amber dotted) - links 31~32
-    linkStyle 31,32 stroke:#d97706,stroke-width:1px,stroke-dasharray:3
+```
+Step 1: Extract columns (job_id, company_name, title, description, formatted_experience_level)
+  ↓ V1 (file integrity) → V2 (null/length)
+Step 2: ST NOC Match (Sentence Transformers, threshold 0.65)
+  + Seniority: formatted_experience_level → title keywords → remaining for LLM
+  ↓ V3 (match rate)
+  ├─ matched (25.7%): NOC + seniority confirmed → Step 4
+  └─ unmatched (74.3%): → Step 3
+Step 3: LLM NOC Match (Claude Haiku, full NOC list 510개)
+  + seniority (if missing) + skills — all in one LLM call
+  Adaptive Batch Strategy (company-grouped)
+  ↓ V4 (completion rate)
+Step 4: LLM Skills Extraction (Step 2 matched only — need skills + missing seniority)
+  ↓
+Merge: Step 2 matched + Step 3 results + Step 4 results
+  ↓
+Step 5: DB Load (jd_postings + jd_skills)
 ```
 
-### Data Flow
+### DAG Task Flow (Airflow)
 
-```mermaid
-flowchart LR
-    subgraph sources ["Data Source"]
-        KG[("Kaggle API<br/>arshkon/linkedin-job-postings<br/>━━━━━━━━━━━<br/>~124K postings<br/>CSV (zip)")]
-    end
-
-    subgraph storage ["Local Storage"]
-        RAW["data/raw/skill-demand/<br/>━━━━━━━━━━━<br/>job_postings.csv<br/>companies.csv"]
-        P1["processed/step1/<br/>━━━━━━━━━━━<br/>columns selected<br/>+ company JOIN<br/>.parquet"]
-        P2["processed/step2/<br/>━━━━━━━━━━━<br/>+ noc_id (ST match)<br/>.parquet"]
-        P3["processed/step3/<br/>━━━━━━━━━━━<br/>+ noc_id (LLM match)<br/>.parquet"]
-        P4["processed/step4/<br/>━━━━━━━━━━━<br/>+ seniority + skills[]<br/>.parquet"]
-    end
-
-    subgraph db ["Pipeline DB (market-trend-db:5432)"]
-        NOC[("noc_titles<br/>━━━━━━━━━━━<br/>510 unit groups<br/>5-digit codes")]
-        JDP[("jd_postings<br/>━━━━━━━━━━━<br/>per-posting row<br/>noc · seniority")]
-        JDS[("jd_skills<br/>━━━━━━━━━━━<br/>per-skill row<br/>jd_id · skill")]
-        VIEW[("skill_demand_summary<br/>━━━━━━━━━━━<br/>VIEW<br/>skill × noc × seniority<br/>→ demand_count")]
-    end
-
-    KG -->|"curl + unzip"| RAW
-    RAW --> P1 --> P2 --> P3 --> P4
-    NOC -.->|"reference lookup"| P2
-    NOC -.->|"reference lookup"| P3
-    P4 -->|"bulk insert"| JDP
-    P4 -->|"explode skills[]"| JDS
-    JDP --- VIEW
-    JDS --- VIEW
-
-    style KG fill:#1565C0,color:#fff
-    style RAW fill:#F57F17,color:#fff
-    style P1 fill:#F57F17,color:#fff
-    style P2 fill:#F57F17,color:#fff
-    style P3 fill:#F57F17,color:#fff
-    style P4 fill:#F57F17,color:#fff
-    style NOC fill:#2E7D32,color:#fff
-    style JDP fill:#2E7D32,color:#fff
-    style JDS fill:#2E7D32,color:#fff
-    style VIEW fill:#2E7D32,color:#fff
+```
+ensure_db → noc_setup → download → validate_file_integrity → step1_extract → validate_nulls_and_length
+  → start_spark_cluster (Master + Livy)
+  → start_spark_workers (Workers)
+  → step2_noc_match_st → validate_noc_match_rate
+  → step3_title_normalize_llm → validate_noc_completion
+  → step4 (🔲 구현 예정)
+  → stop_spark_workers
+  → step5_load
+  → stop_spark_cluster
 ```
 
-### NOC Normalization — Two-Stage Strategy
+### NOC Matching — Two-Stage Strategy
+
+**Why two stages?**
+- ST (Sentence Transformers) is fast, free, local — catches obvious matches (25.7%)
+- LLM handles the rest with full NOC context — expensive but accurate (72.3% additional)
+- Combined: **97.9% NOC coverage** (verified on 721-row sample)
 
 ```mermaid
 flowchart TD
-    TITLE["job title<br/>(from CSV)"]
-    ST["Sentence Transformers<br/>all-MiniLM-L6-v2<br/>cosine similarity<br/>vs 510 NOC titles"]
-    SCORE{score >= threshold?}
-    MATCH_ST["noc_id = best match<br/>noc_match_method = 'sentence_transformer'<br/>noc_match_score = cosine score"]
-    LLM["Claude Haiku CLI<br/>reads full JD description<br/>picks best NOC from candidates"]
-    MATCH_LLM["noc_id = LLM pick<br/>noc_match_method = 'llm'<br/>noc_match_score = NULL"]
-    NO_MATCH["noc_id = NULL<br/>(could not determine)"]
+    TITLE["raw title + company"]
+    ST["Step 2: Sentence Transformers<br/>all-MiniLM-L6-v2<br/>cosine similarity vs 510 NOC titles"]
+    SCORE{score >= 0.65?}
+    MATCH_ST["NOC confirmed<br/>noc_match_method = 'sentence_transformer'<br/>noc_match_score = cosine score"]
+    LLM["Step 3: Claude Haiku CLI<br/>title + company + full NOC list (510)<br/>'Pick the best NOC or null'"]
+    MATCH_LLM["NOC confirmed<br/>noc_match_method = 'llm_noc_match'<br/>noc_match_score = NULL"]
+    NO_MATCH["noc_id = NULL<br/>(LLM said no match — 2.1%)"]
 
     TITLE --> ST --> SCORE
-    SCORE -->|"yes"| MATCH_ST
-    SCORE -->|"no"| LLM
-    LLM -->|"confident"| MATCH_LLM
-    LLM -->|"unable to determine"| NO_MATCH
+    SCORE -->|"yes (25.7%)"| MATCH_ST
+    SCORE -->|"no (74.3%)"| LLM
+    LLM -->|"matched (72.3%)"| MATCH_LLM
+    LLM -->|"null (2.1%)"| NO_MATCH
 
     style MATCH_ST fill:#4CAF50,color:#fff
     style MATCH_LLM fill:#FF9800,color:#fff
@@ -250,170 +112,251 @@ flowchart TD
     style LLM fill:#9C27B0,color:#fff
 ```
 
+### Design Evolution — What We Tried
+
+Three approaches were tested before the final design:
+
+1. **❌ LLM title normalize → ST re-match** (36.8%)
+   - LLM cleaned up titles (e.g. "Unix Manager in Jersey City, NJ" → "IT Manager")
+   - Cleaned title re-matched against NOC via ST
+   - Problem: LLM doesn't know NOC categories — titles already clean (e.g. "Marketing Analyst") still scored 0.69 vs NOC's long name "Business development officers and market researchers and analysts"
+
+2. **❌ ST with title + JD** (worse than title-only)
+   - Hypothesis: JD contains role context → better matching
+   - Test result: scores dropped (0.71 → 0.46) — JD noise (benefits, company desc) diluted cosine similarity
+   - `all-MiniLM-L6-v2` max 256 tokens → most JD (avg 3768 chars) truncated
+
+3. **✅ LLM with full NOC list** (97.9%)
+   - LLM receives: title + company + all 510 NOC categories
+   - Picks best match or returns null
+   - Simple, accurate, LLM handles semantic understanding
+
 ### Schedule & Config
 
-| Setting                     | Value                                                    |
-| --------------------------- | -------------------------------------------------------- |
-| Schedule                    | `None` (manual trigger only)                           |
-| DAG file                    | `dags/skill_demand_dag.py`                             |
-| XCom data                   | File paths only (not DataFrames)                         |
-| `MANAGE_PIPELINE_DB=true` | `ensure_db` starts local Docker DB                     |
-| `MANAGE_SPARK=true`       | `ensure_spark` / `stop_spark` manage Spark lifecycle |
+| Setting | Value |
+|---------|-------|
+| Schedule | `None` (manual trigger only) |
+| DAG file | `dags/skill_demand_dag.py` |
+| DAG params | `noc_threshold`, `batch_delay_sec`, `step1_input`, executor memory/instances |
+| Spark submission | `@task + LivyHook` (real-time log + file-based progress monitoring) |
 
-## Pipeline Steps
+## Pipeline Steps — Detail
 
-### Download — Kaggle Dataset Acquisition (BashOperator)
+### Step 1 — Column Extraction (`src/step1_select_columns.py`)
 
-|             | Value                                                                                               |
-| ----------- | --------------------------------------------------------------------------------------------------- |
-| Input       | Kaggle API endpoint                                                                                 |
-| Output      | `data/raw/skill-demand/job_postings.csv`, `data/raw/skill-demand/company_details/companies.csv` |
-| Idempotency | Skip if `job_postings.csv` already exists                                                         |
+| | Value |
+|---|---|
+| Input | `postings.csv` |
+| Output | `processed/step1/step1_extracted.parquet` |
+| Columns | `job_id`, `company_name`, `title`, `description`, `formatted_experience_level` |
 
-- BashOperator: `curl -L` + `unzip`
-- Requires `~/.kaggle/kaggle.json` credentials in Spark/Airflow container
-- Skip download if raw file already present on disk
-
-### Step 1 — Column Extraction + Company JOIN (`src/step1_select_columns.py`)
-
-|         | Value                                                                          |
-| ------- | ------------------------------------------------------------------------------ |
-| Input   | `data/raw/skill-demand/job_postings.csv` + `company_details/companies.csv` |
-| Output  | `processed/step1/*.parquet`                                                  |
-| Columns | `job_id`, `company` (from JOIN), `title`, `description`                |
-
-- JOIN `job_postings.csv` → `companies.csv` on `company_id` to resolve company name
 - Drop rows with null `title` or `description`
-- No transformation — pure extraction + JOIN
+- `run()` function saves parquet; `select_columns()` returns DataFrame (for testing)
 
-### Step 2 — NOC Normalization: Sentence Transformers (`src/step2_noc_normalize.py`)
+### Step 2 — NOC Match via Sentence Transformers (`spark/step2_noc_spark.py`)
 
-|               | Value                                                                                      |
-| ------------- | ------------------------------------------------------------------------------------------ |
-| Input         | Step 1 parquet                                                                             |
-| Output        | `processed/step2/*.parquet` (adds `noc_id`, `noc_match_score`, `noc_match_method`) |
-| Model         | `sentence-transformers/all-MiniLM-L6-v2` (local, ~80MB, no API)                          |
-| NOC Reference | 510 unit group titles (5-digit codes only from `noc_titles`)                             |
-| Threshold     | TBD — tuned after first run (starting at 0.75)                                            |
+| | Value |
+|---|---|
+| Input | Step 1 parquet |
+| Output | `processed/step2/step2_normalized.parquet` |
+| Model | `sentence-transformers/all-MiniLM-L6-v2` (local, ~80MB, no API) |
+| Threshold | 0.65 (configurable via DAG param `noc_threshold`) |
 
 **Why Sentence Transformers over TF-IDF:**
-
-- Semantic understanding: `"Full Stack Developer"` → `"Web designers and developers"` (meaning-based)
+- Semantic understanding: `"Full Stack Developer"` → `"Web designers and developers"` ✅
 - TF-IDF misses this because keywords don't overlap
 
-**Why not LLM for primary matching:**
+**Why ST is filter, not final matcher:**
+- ST scores 0.65-0.69 include correct matches (e.g. "Marketing Analyst" → 0.69) that fail threshold
+- NOC titles are long and differently worded — cosine sim has ceiling
+- ST catches 25.7% confidently; remaining 74.3% needs LLM semantic judgment
 
-- 510 NOC titles fit in memory — no search infrastructure needed
-- Reproducible scores, no API cost, deterministic output
+**Seniority extraction in Step 2 (no LLM needed):**
 
-**Execution:** Spark UDF — NOC vectors broadcast to all workers, each worker encodes job titles locally.
+| Priority | Source | Coverage |
+|---|---|---|
+| 1st | `formatted_experience_level` from CSV | 76.3% (94,440/123,849) |
+| 2nd | Title keyword matching | +6.2% (6,192 additional) |
+| 3rd | LLM (Step 3 or Step 4) | 18.7% remaining (23,217) |
 
-### Step 3 — NOC Normalization: LLM Fallback (`src/step3_noc_llm_fallback.py`)
+Title keyword rules:
+```
+intern:      intern, internship, co-op, coop
+entry_level: junior, jr, entry level, entry-level, graduate, trainee
+mid_level:   mid level, mid-level, intermediate
+senior:      senior, sr, lead, principal, staff
+executive:   director, vp, vice president, head of, chief, cto, ceo, cfo
+```
 
-|         | Value                                                                   |
-| ------- | ----------------------------------------------------------------------- |
-| Input   | Step 2 parquet (sub-threshold rows only)                                |
-| Output  | `processed/step3/*.parquet` (fills in remaining `noc_id`)           |
-| Model   | Claude Haiku (Claude CLI subprocess)                                    |
-| Context | Full JD description (more context = better decision than title alone)   |
-| Pattern | Same as `phase3_map_titles_to_onet_spark.py` — batched, checkpointed |
+`formatted_experience_level` distribution (full dataset):
+```
+Mid-Senior level    41,489
+Entry level         36,708
+Associate            9,826
+Director             3,746
+Internship           1,449
+Executive            1,222
+Null                29,409
+```
 
-- Rows already matched in Step 2 are passed through unchanged
-- Claude CLI invoked via `subprocess.run(['claude', '--print', '--model', 'haiku', '-'])`
-- `HOME=/tmp` for credentials inside Spark worker containers
-- Batch-level JSON checkpoints for resume on failure
+**Spark features:**
+- `repartition(N)`: distribute across workers
+- Broadcast: NOC 510 embeddings sent to all workers
+- Chunk encoding: 1000 titles/chunk for progress reporting
+- Progress files: worker writes JSON → Airflow reads directly (not via Livy stdout)
+- `HF_HUB_DISABLE_PROGRESS_BARS=1`: prevent Livy LineBufferedStream encoding crash
 
-### Step 4 — Seniority + Skill Extraction (`src/step4_extract.py`)
+### Step 3 — LLM NOC Match + Seniority + Skills (`spark/step3_title_normalize_llm_spark.py`)
 
-|          | Value                                                            |
-| -------- | ---------------------------------------------------------------- |
-| Input    | Step 3 parquet                                                   |
-| Output   | `processed/step4/*.parquet` (adds `seniority`, `skills[]`) |
-| Model    | Claude Haiku, temperature 0                                      |
-| Strategy | Single LLM call per JD extracts both seniority AND skills        |
+| | Value |
+|---|---|
+| Input | Step 2 unmatched rows |
+| Output | `processed/step3/step3_normalized.parquet` (merged with Step 2 matched) |
+| Model | Claude Haiku CLI (subscription, `HOME=/tmp` for credentials) |
 
-**Why LLM over existing columns:**
+LLM prompt includes:
+- Company name (context)
+- Job title(s)
+- Full NOC list (510 categories)
+- Request: pick best NOC or null + seniority + skills
 
-- `formatted_experience_level`: exists in CSV but inconsistent — LLM reading full JD is more reliable
-- `skills_desc`: exists as free-text, but LLM extracts structured skill list from full `description`
+`noc_match_method = "llm_noc_match"`, `noc_match_score = None` (LLM doesn't give numeric score)
 
-**Seniority tiers (5 levels):**
+**Sample results (721 rows):**
+```
+Total:              721
+Step 2 matched:     185 (25.7%) — ST, threshold 0.65
+Step 3 matched:     521 (72.3%) — LLM NOC match
+Step 3 null:         15 (2.1%) — LLM said no match
+Total NOC:          706 (97.9%)
+Time:               ~17 minutes
+```
 
-| Tier            | Description                       |
-| --------------- | --------------------------------- |
-| `intern`      | Internship / co-op / student      |
-| `entry_level` | 0–2 years, junior, associate     |
-| `mid_level`   | 2–5 years, intermediate          |
-| `senior`      | 5+ years, senior, lead, principal |
-| `executive`   | Director, VP, C-suite             |
+#### Adaptive Batch Strategy
 
-**Skills:** LLM extracts all technical skills as lowercase strings from JD text (no predefined list — open extraction).
+LLM calls optimized by company size. Brute force 103K → **1,758 calls (98% reduction)**.
 
-**Why single call for both:**
+| Company Size | Companies | Strategy | Titles/Call | LLM Calls |
+|---|---|---|---|---|
+| >=30 titles | 376 | 1 company per call, 50 titles/batch | ~50 | ~653 |
+| 10-29 titles | 819 | 2-3 companies per call | 30-57 | ~273 |
+| 1-9 titles | 20,653 | Mixed batch, 40 titles/call | ~40 | ~692 |
+| **Total** | | | | **~1,758** |
 
-- Both need the same JD description as input — no extra cost to extract together
-- Halves the number of LLM calls vs separate steps
+**Brute force comparison:**
 
-**Execution:** Spark UDF, batched (batch size TBD), checkpointed per batch.
+| Method | LLM Calls |
+|------|-----------|
+| Row-by-row | 103,070 |
+| Unique (title, company) pair | 81,565 |
+| Unique title only | 66,419 |
+| Company-by-company | 21,165 |
+| **Adaptive Batch** | **1,758** |
+
+**Design rationale:**
+- >=30 titles: Large companies (Amazon 286, TEKsystems 395). Company context improves LLM accuracy. Internal 50-title batching.
+- 10-29 titles: 2-3 companies per call — still fits in one prompt with company labels.
+- 1-9 titles: 20,653 companies, mostly 1-2 titles. Company context adds little value. Batch 40 titles with company name as reference.
+
+**Spark features:**
+- `repartition("company_name")`: same company → same worker
+- `mapPartitions` + `groupby`: adaptive processing per company size
+- Checkpoint: per-company JSON files → resume on failure
+- Progress: per-company JSON → Airflow reads directly
+- Data-aware Partitioning: processing strategy changes dynamically based on data characteristics
+
+### Step 4 — LLM Skills Extraction (🔲 구현 예정)
+
+| | Value |
+|---|---|
+| Input | Step 2 matched rows (have NOC + seniority, need skills) |
+| Output | Enriched with `skills[]`, missing `seniority` filled |
+| Model | Claude Haiku CLI |
+
+Step 2 matched rows already have NOC and seniority but no skills.
+LLM reads JD → extracts skills. If seniority missing (18.7%), extracts that too.
+Adaptive Batch Strategy reusable.
+
+**Design question (to decide):**
+- Can Step 3 prompt (NOC + seniority + skills) be reused for Step 4 (skills + seniority only)?
+- Or simpler separate prompt: "Extract skills from this JD"
 
 ### Step 5 — DB Load (`src/step5_load.py`)
 
-|        | Value                                                |
-| ------ | ---------------------------------------------------- |
-| Input  | Step 4 parquet                                       |
+| | Value |
+|---|---|
+| Input | Merged parquet (Step 2 matched + Step 3 results + Step 4 results) |
 | Output | `jd_postings` + `jd_skills` tables in PostgreSQL |
 
 - Bulk insert `jd_postings` (one row per job posting)
 - Explode `skills[]` array → bulk insert `jd_skills` (one row per skill per posting)
 - `ON CONFLICT DO NOTHING` for idempotent reruns
+- Schema created by `main.py ensure_schema()` or DAG `noc_setup` task
 
 ## Infrastructure
 
-### Required Services
+### Services
 
-| Service                                | Compose File                    | How it starts                        |
-| -------------------------------------- | ------------------------------- | ------------------------------------ |
-| Airflow (webserver, scheduler, worker) | `docker-compose.airflow.yml`  | Manual:`./infra/up.sh airflow`     |
-| Pipeline DB (port 5432)                | `docker-compose.postgres.yml` | Automatic: DAG `ensure_db` task    |
-| Spark master + workers + Livy          | `docker-compose.spark.yml`    | Automatic: DAG `ensure_spark` task |
+| Service | Compose File | How it starts | Port |
+|---|---|---|---|
+| Airflow | `docker-compose.airflow.yml` | Manual: `./up.sh airflow` | 8090 |
+| Skill-demand DB | `docker-compose.postgres-sd.yml` | DAG: `ensure_db` | 5434 |
+| Spark SD Master | `docker-compose.spark-sd.yml` | DAG: `start_spark_cluster` | 8081 |
+| Spark SD Workers | `docker-compose.spark-sd.yml` | DAG: `start_spark_workers` | - |
+| Livy SD | `docker-compose.spark-sd.yml` | DAG: `start_spark_cluster` | 8999 |
 
-**Note:** Pipeline DB is shared with the market-trend stream (`noc_titles` table). Skill-demand adds `jd_postings` and `jd_skills` to the same DB.
+**Separate from matching-insights:** Dedicated Spark cluster (`giljobi-spark-sd`) with:
+- `spark-worker-sd/Dockerfile`: Python 3.11 + sentence-transformers + PyTorch + Claude CLI + Node.js
+- `livy-sd/Dockerfile`: Same packages for driver + `JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"`
 
-### Schema Initialization
-
-Skill-demand schema is defined in `infra/init/02-matching-insights.sql`. Runs automatically on fresh volume. To reinitialize:
-
-```bash
-./infra/down.sh postgres -v
-./infra/up.sh postgres
+**Spark lifecycle in DAG (resource management):**
+```
+start_spark_cluster (Master + Livy only)
+  → start_spark_workers (Workers — alive only during Spark jobs)
+    → [Step 2 + Step 3 Spark jobs]
+  → stop_spark_workers (free resources)
+  → [Step 5 DB load — no Spark needed]
+→ stop_spark_cluster (cleanup)
 ```
 
-## Output Schema (Database)
+### Monitoring
+
+| Source | What it shows | How |
+|---|---|---|
+| Airflow task log | Driver stdout + progress | `@task + LivyHook` polling (Livy log + file read) |
+| Worker progress files | Rows processed, matched count | Workers write JSON → Airflow reads directly |
+| Spark Master UI (:8081) | Worker status, executors | Browser |
+| Spark App UI (:4040) | Job/stage/task progress | Browser (during job only) |
+
+**Why not Livy stdout for progress:**
+- Accumulator: lazy — values update only after `collect()` completes
+- Threading print: Livy `LineBufferedStream` doesn't capture from non-main threads during `collect()` block
+- Solution: Workers write files to shared volume, Airflow reads directly in polling loop
+
+## DB Schema
 
 ### Table: `jd_postings`
 
-| Column               | Type         | Constraint           | Description                                                               |
-| -------------------- | ------------ | -------------------- | ------------------------------------------------------------------------- |
-| `id`               | SERIAL       | PRIMARY KEY          | Auto-generated                                                            |
-| `company`          | VARCHAR(300) |                      | Company name (from companies.csv JOIN)                                    |
-| `raw_title`        | VARCHAR(300) | NOT NULL             | Original job title from CSV                                               |
-| `noc_id`           | INT          | FK → noc_titles(id) | NULL if no match found                                                    |
-| `noc_match_score`  | NUMERIC(4,3) |                      | Cosine similarity score (ST only); NULL for LLM matches                   |
-| `noc_match_method` | VARCHAR(30)  |                      | `'sentence_transformer'` or `'llm'`                                   |
-| `seniority`        | VARCHAR(50)  | CHECK enum           | `intern` / `entry_level` / `mid_level` / `senior` / `executive` |
-| `description`      | TEXT         |                      | Full JD text (kept for re-processing)                                     |
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | SERIAL | PRIMARY KEY | Auto-generated |
+| `company` | VARCHAR(300) | | Company name |
+| `raw_title` | VARCHAR(300) | NOT NULL | Original job title |
+| `noc_id` | INT | FK → noc_titles(id) | NULL if no match (2.1%) |
+| `noc_match_score` | NUMERIC(4,3) | | ST cosine score; NULL for LLM |
+| `noc_match_method` | VARCHAR(30) | | `sentence_transformer` or `llm_noc_match` |
+| `seniority` | VARCHAR(50) | CHECK enum | intern/entry_level/mid_level/senior/executive |
+| `description` | TEXT | | Full JD text |
 
 ### Table: `jd_skills`
 
-| Column    | Type         | Constraint            | Description                                          |
-| --------- | ------------ | --------------------- | ---------------------------------------------------- |
-| `id`    | SERIAL       | PRIMARY KEY           | Auto-generated                                       |
-| `jd_id` | INT          | FK → jd_postings(id) | Parent posting                                       |
-| `skill` | VARCHAR(100) | NOT NULL              | Lowercase skill string (e.g.`"python"`, `"aws"`) |
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | SERIAL | PRIMARY KEY | |
+| `jd_id` | INT | FK → jd_postings(id) | |
+| `skill` | VARCHAR(100) | NOT NULL | Lowercase (e.g. "python", "aws") |
 
 ### View: `skill_demand_summary`
-
-Aggregates skill demand for analytics queries:
 
 ```sql
 SELECT noc21_name, seniority, skill, demand_count
@@ -425,233 +368,52 @@ LIMIT 20;
 
 ## Key Technical Decisions
 
-| Decision              | Choice                                           | Rationale                                                                                        |
-| --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| Data source           | `arshkon/linkedin-job-postings` (Kaggle)       | 124K postings,`title` + `description` + `company_id` in single CSV, 166.5MB zip            |
-| Data acquisition      | Kaggle API curl in DAG                           | Automated download, no manual step, idempotent                                                   |
-| NOC version           | 2021 (5-digit unit groups only)                  | Current Canadian standard; exclude 6 broad 2-digit categories                                    |
-| Primary NOC matching  | Sentence Transformers                            | Semantic similarity, local execution, measurable reproducible scores                             |
-| Fallback NOC matching | LLM + full JD description                        | Handles ambiguous titles — full JD gives more context than title alone                          |
-| Seniority extraction  | LLM from JD (not `formatted_experience_level`) | CSV field is inconsistent; LLM reading full JD produces reliable 5-tier classification           |
-| Skill extraction      | LLM from JD (not `skills_desc`)                | `skills_desc` is free-text; LLM extracts structured lowercase skill list from full description |
-| Seniority + skills    | Single LLM call                                  | Both need the same JD input — no reason to call twice                                           |
-| Skill storage         | Normalized `jd_skills` table                   | Enables `COUNT(*) GROUP BY skill` without unnesting arrays                                     |
-| LLM invocation        | Claude CLI subprocess                            | Subscription-based; same proven pattern as existing phase3 mapping code                          |
-| Spark job submission  | `@task` + `LivyHook` (not `LivyOperator`)       | Same Livy REST API, but custom polling loop fetches logs in real-time (10s interval)             |
-| Spark UDF             | Steps 2, 3, 4                                    | Distributes encoding/LLM calls across workers for scale                                          |
-| Checkpointing         | Per-batch JSON files                             | Resume interrupted LLM processing without restarting from scratch                                |
-| Spark infra separation | `docker-compose.spark-sd.yml` (separate cluster) | Dedicated worker image with sentence-transformers; isolated from matching-insights cluster        |
-| Spark resource lifecycle | Cluster → Workers → (jobs) → Workers down → Cluster down | Workers only alive during Spark jobs; Master+Livy stay longer for job submission                |
+| Decision | Choice | Rationale |
+|---|---|---|
+| Data source | `arshkon/linkedin-job-postings` (Kaggle) | 124K postings, single CSV with all needed columns |
+| NOC primary match | Sentence Transformers (0.65) | Fast, free, local. Filters 25.7% confidently |
+| NOC fallback | LLM with full NOC list (510) | 97.9% total. Tried: normalize+re-match (36.8%), ST+JD (worse) |
+| Seniority | 3-tier: CSV (76.3%) → keyword (6.2%) → LLM (18.7%) | Minimize LLM usage |
+| Skills | LLM from JD | No alternative — JD parsing required |
+| Batch strategy | Adaptive by company size | 98% reduction (103K → 1,758 calls) |
+| Spark submission | `@task + LivyHook` | Real-time log (vs LivyOperator state-only) |
+| Progress | Airflow reads worker files directly | Livy stdout unreliable (encoding/threading/blocking) |
+| Spark infra | Separate cluster (`spark-sd`) | Different packages than matching-insights |
+| LLM auth | `~/.claude:/tmp/.claude` mount, `HOME=/tmp` | Claude CLI subscription credentials |
 
 ## Roadmap
 
-### Phase 1: Pipeline 완성 (현재)
+### Phase 1: Pipeline (current)
 
-로컬 Docker Compose 환경에서 전체 파이프라인 구현.
-
-| Step | 파일 | 상태 | 설명 |
-|------|------|------|------|
-| Download | `src/download.py` | ✅ 완료 | Kaggle API curl + unzip, idempotent |
-| V1 | `src/validators/v1_download.py` | ✅ 완료 | 파일 존재, 컬럼 검증, row count |
-| Step 1 | `src/step1_select_columns.py` | ✅ 완료 | job_id, company_name, title, description 추출 + parquet 저장 |
-| V2 | `src/validators/v2_extract.py` | ✅ 완료 | null drop, description min length |
-| Step 2 | `spark/step2_noc_spark.py` | ✅ 완료 | Sentence Transformers cosine similarity → NOC match (threshold 0.65) |
-| V3 | `src/validators/v3_normalize.py` | ✅ 완료 | match rate, split stats |
-| Step 3 | `spark/step3_title_normalize_llm_spark.py` | ✅ 완료 | LLM NOC match with full NOC list + Adaptive Batch (97.9% on sample) |
-| V4 | `src/validators/v4_fallback.py` | ✅ 완료 | NOC completion rate, method breakdown |
-| Step 4 | `src/step4_extract.py` | 🔲 재설계 필요 | seniority + skills 추출 (Step 3에 합칠지 검토) |
-| V5 | `src/validators/v5_enrich.py` | ✅ 완료 | seniority enum check, skills count |
-| Step 5 | `src/step5_load.py` | ✅ 완료 | jd_postings + jd_skills bulk insert |
-| DAG | `dags/skill_demand_dag.py` | ✅ 완료 | @task + LivyHook (실시간 로그 + file progress), DAG params |
-| Infra | `docker-compose.spark-sd.yml` | ✅ 완료 | 별도 Spark cluster (ST + Claude CLI) |
-| main.py | `main.py` | ✅ 완료 | CLI orchestrator (pandas, 로컬 테스트용) |
-
-TDD 패턴: `test first (RED) → code (GREEN)` — 각 step마다 테스트 먼저 작성.
-
-테스트 현황: 133 tests passing
-
-**Sample 검증 결과 (721행):**
-```
-Step 2 ST matched:  185 (25.7%) — threshold 0.65
-Step 3 LLM matched: 521 (72.3%) — NOC full list
-Step 3 null:         15 (2.1%) — LLM said no match
-Total NOC:          706 (97.9%)
-```
-
-### Pipeline Redesign (구현 완료)
-
-**문제**: Step 2 (ST) threshold 0.65에서 25.7%만 매칭. 나머지를 어떻게 NOC 매칭할 것인가.
-
-**시도한 방법들:**
-1. ❌ LLM title normalize → ST re-match: 36.8% (LLM이 NOC 모른 채 정리만 → 효과 제한적)
-2. ❌ ST에 title + JD 넣기: score 오히려 떨어짐 (JD 노이즈가 cosine sim 희석)
-3. ✅ **LLM에 NOC 510개 전체 목록 주고 "골라"**: 97.9% 매칭
-
-**최종 파이프라인 흐름**:
-```
-step1 (extract)
-→ step2_noc_match_st (raw title → NOC, threshold 0.65)
-    + seniority 추출 (formatted_experience_level + title keyword)
-→ step3 (unmatched → LLM NOC + seniority + skills 한 번에)
-→ step4 (matched from step2 → LLM skills만, seniority 없으면 추가)
-→ merge (step2 matched + step3 results + step4 results)
-→ step5 (DB load)
-```
-
-### Step 4 Redesign (계획, 구현 예정)
-
-**Seniority 추출 — 3단계 전략:**
-
-전체 데이터 기준 seniority 커버리지 분석:
-
-| 소스 | 커버리지 | 신뢰도 |
-|------|---------|--------|
-| `formatted_experience_level` (CSV 원본) | 94,440 (76.3%) | 중간 — LinkedIn 메타데이터 |
-| Title keyword 매칭 | 27,614 (22.3%) | 높음 — 타이틀에 명시 |
-| **둘 합치면** | **100,632 (81.3%)** | |
-| **LLM 필요 (나머지)** | **23,217 (18.7%)** | |
-
-`formatted_experience_level` 분포:
-```
-Mid-Senior level    41,489
-Entry level         36,708
-Associate            9,826
-Director             3,746
-Internship           1,449
-Executive            1,222
-Null                29,409
-```
-
-Title keyword 매칭 규칙:
-```
-intern:      intern, internship, co-op, coop
-entry_level: junior, jr, entry level, entry-level, graduate, trainee
-mid_level:   mid level, mid-level, intermediate
-senior:      senior, sr, lead, principal, staff
-executive:   director, vp, vice president, head of, chief, cto, ceo, cfo
-```
-
-**Seniority 적용 순서:**
-```
-1순위: formatted_experience_level 있으면 사용 (76.3%)
-2순위: title keyword 매칭 (추가 6.2%)
-3순위: LLM이 JD 읽고 판단 (나머지 18.7%)
-```
-
-**Skills 추출:**
-- Skills는 전체 row에서 JD 기반으로 LLM 추출 필요
-- seniority와 같은 LLM call에서 동시 추출 가능
-
-**Step 설계 (검토 중):**
-
-Option A: Step별 분리
-```
-Step 2: ST NOC 매칭 + seniority (keyword + formatted_experience_level)
-Step 3: unmatched → LLM (NOC + seniority + skills 한 번에)
-Step 4: matched → LLM (skills만, seniority 없으면 추가)
-```
-
-Option B: LLM 호출 통합
-```
-Step 2: ST NOC 매칭 + seniority (keyword + formatted_experience_level)
-Step 3: unmatched → LLM (NOC 한 번에) — 현재 구현
-Step 4: 전체 → LLM (skills + 남은 seniority) — adaptive batch 재활용
-```
-
-**핵심 결정 포인트:**
-- Step 3 (NOC)과 Step 4 (skills)를 같은 LLM call로 합칠 수 있는가?
-  - 합치면: unmatched에 대해 LLM 1번 (NOC + seniority + skills)
-  - 분리하면: Step 3 LLM (NOC), Step 4 LLM (skills) = 2번
-  - 근데 matched는 어차피 Step 4에서 skills만 별도 LLM 필요
-- `formatted_experience_level`을 Step 1에서 미리 가져올 것인가, Step 2에서 처리할 것인가
-- Adaptive Batch Strategy를 skills 추출에도 동일하게 적용할 것인가
-
-#### Adaptive Batch Strategy — Company Size 기반 LLM 호출 최적화
-
-**Brute Force 비교**:
-
-| 방식 | LLM Calls | 비고 |
-|------|-----------|------|
-| Row별 개별 호출 | 103,070 | unmatched row마다 1 call |
-| Unique (title, company) pair | 81,565 | 중복 title 제거 |
-| Unique title only | 66,419 | company 무시 |
-| Company별 1 call | 21,165 | company 수만큼 |
-| **Adaptive Batch** | **1,758** | **아래 전략** |
-
-Company size에 따라 배치 전략을 다르게 적용해서 brute force 103K 대비 **98% 감소**:
-
-| Company Size | Companies | Strategy | Titles/Call | LLM Calls |
-|---|---|---|---|---|
-| >=50 titles | 174 | 1 company per call, 50 titles/batch | ~50 | 451 |
-| 30-49 titles | 202 | 1 company per call | 30-49 | 202 |
-| 20-29 titles | 280 | 2 companies per call | 40-58 | 140 |
-| 10-19 titles | 819 | 3 companies per call | 30-57 | 273 |
-| 1-9 titles | 20,653 | Mixed batch, 40 titles/call | ~40 | 692 |
-| **Total** | **22,128** | | | **1,758** |
-
-**기존 21K calls → 1,758 calls (92% 감소)**
-
-**전략 근거**:
-- **>=50 titles**: 대기업 (Amazon 286, TEKsystems 395 등). 같은 company의 titles를 함께 보내면 LLM이 company 맥락으로 더 정확한 normalization 가능. 내부적으로 50개씩 batch.
-- **30-49 titles**: 1 call이면 끝나는 크기. company 맥락 유지.
-- **20-29 titles**: 2개 company를 합쳐도 40-58 titles → 1 call에 적당. company 구분 표시.
-- **10-19 titles**: 3개 company 합쳐서 30-57 titles. company 구분 표시.
-- **1-9 titles**: 20,653 companies (대부분 1-2 titles). Company 맥락이 크게 의미 없는 소규모 → title만 40개씩 묶어서 batch. Company name은 참고용으로 포함.
-
-```
-# 대기업 (>=50): company 맥락 중요
-"Company: Amazon. Normalize these job titles:
-- SDE II, Alexa
-- Sr. TPM, AWS Infrastructure
-- Software Engineer, Kindle"
-
-# 소규모 (<10): mixed batch, company는 참고용
-"Normalize these job titles (company in parentheses):
-- Store Lead FT (Walmart)
-- RN ICU Night (Kaiser)
-- Admin Asst II (Deloitte)"
-```
-
-#### Spark Features 활용
-
-| Spark Feature | 적용 | 효과 |
+| Step | Status | Note |
 |---|---|---|
-| **repartition("company_name")** | Step 3 | 같은 company의 rows가 같은 worker에 모임 → company별 LLM call 가능 |
-| **mapPartitions + groupBy** | Step 3 | partition 내에서 company별 grouping → adaptive batch 전략 적용 |
-| **Broadcast Join** | Step 2, 3 | NOC 510개 벡터를 모든 worker에 복사 → shuffle 없이 cosine similarity |
-| **Checkpoint (per-company)** | Step 3 | company별 JSON checkpoint → 실패 시 resume, progress monitoring |
-| **Data-aware Partitioning** | Step 3 | company size에 따라 처리 방식 동적 변경 — Spark의 partition 특성을 활용한 adaptive processing |
+| Download | ✅ | Kaggle API, idempotent |
+| V1, V2 | ✅ | File integrity, null/length |
+| Step 1 | ✅ | Column extraction + parquet |
+| Step 2 | ✅ | ST NOC match (0.65) + seniority (CSV + keyword) |
+| V3 | ✅ | Match rate stats |
+| Step 3 | ✅ | LLM NOC match + Adaptive Batch (97.9% on sample) |
+| V4 | ✅ | Completion rate (97.9%) |
+| **Step 4** | **🔲** | **Skills extraction + remaining seniority — redesign in progress** |
+| V5 | ✅ | Seniority/skills validation (code ready) |
+| Step 5 | 🔲 | DB load (path update needed for new flow) |
+| DAG | ✅ | Full orchestration with resource lifecycle |
+| Infra | ✅ | Separate Spark-SD cluster |
+| Tests | 133 passing | |
 
-이 설계는 **Data-aware Partitioning** 패턴 — 데이터 특성(company size)에 따라 partition 내에서 처리 전략을 동적으로 변경. Spark의 `repartition` + `mapPartitions`가 이걸 자연스럽게 가능하게 함.
+### Phase 2: AWS (Terraform)
 
-### Phase 2: AWS 배포 (Terraform)
+EC2 (Airflow Docker Compose) + EMR (Spark+Livy built-in) + S3 (data).
+`terraform apply` → create all → work → `terraform destroy` → cost zero.
+See: `resources/datapipeline/aws-deployment-options.md`
 
-AWS Academy Learner Lab 환경에 배포. Terraform으로 인프라 코드화.
+### Phase 3: market-trend Spark migration
 
-| 항목 | 로컬 | AWS |
-|------|------|-----|
-| Airflow | Docker Compose | EC2 + Docker Compose |
-| Spark + Livy | Docker Compose | EMR (Livy 내장) |
-| Data storage | 로컬 파일 | S3 |
-| Infra 관리 | `up.sh` / `down.sh` | `terraform apply` / `terraform destroy` |
+Apply same Spark patterns (Broadcast Join, UDF, Partitioned Write, Accumulator) to market-trend pipeline.
+See: `pipelines/market-trend/SPEC.md` Spark Features section.
 
-핵심: 데이터는 S3에 영속, 인프라는 일회용 (세션마다 recreate).
+## Reference Documents
 
-Terraform 구조: `infra/aws/` — `emr.tf`, `ec2-airflow.tf`, `s3.tf`, `security-groups.tf`
-
-참고 문서:
-- `resources/Giljobi-Project/resources/datapipeline/aws-deployment-options.md`
-- `resources/Giljobi-Project/resources/datapipeline/spark-job-submission-comparison.md`
-
-### Phase 3: market-trend Spark 전환
-
-Phase 1에서 확립된 Spark 패턴을 market-trend pipeline에 적용.
-
-| 변경 | Before (pandas) | After (PySpark) |
-|------|----------------|-----------------|
-| Transform | `pandas.read_csv()` + apply | `spark.read.csv()` + UDF + Broadcast Join |
-| Load | psycopg2 COPY | Spark JDBC write |
-| NOC mapping | dict lookup | Broadcast Join |
-| DAG | `@task` decorator | LivyOperator |
-
-market-trend SPEC.md에 Spark Features 섹션 이미 추가됨 — 구현만 하면 됨.
+- `resources/datapipeline/spark-cluster-architecture.md` — Spark architecture with mermaid diagrams
+- `resources/datapipeline/spark-job-submission-comparison.md` — Livy vs SparkSubmit + LivyHook architecture change
+- `resources/datapipeline/aws-deployment-options.md` — AWS Academy deployment + Terraform
