@@ -52,5 +52,5 @@ RUN pip install --no-cache-dir \
     apache-airflow-providers-apache-livy \
     pandas \
     psycopg2-binary \
-    pyarrow \
+    "pyarrow>=23.0" \
     requests

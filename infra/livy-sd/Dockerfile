@@ -42,10 +42,23 @@ RUN curl -fsSL https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spar
 # -----------------------------------------------------------------------------
 ENV SPARK_HOME=/opt/spark
 ENV PATH=$SPARK_HOME/bin:$PATH
+# Fix Livy LineBufferedStream MalformedInputException on non-ASCII stdout
+ENV JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"
 
 # -----------------------------------------------------------------------------
 # 4. Livy configuration
 #    Copy config into the image instead of volume mount to avoid
 #    Docker-in-Docker path resolution issues.
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# 5. Python packages for skill-demand driver
+#    Driver runs on Livy (client deploy mode), so it needs the same
+#    packages as the workers.
+# -----------------------------------------------------------------------------
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 && \
+    python3.11 -m pip install --no-cache-dir \
+        numpy pandas pyarrow \
+        sentence-transformers \
+        psycopg2-binary sqlalchemy
+
 COPY livy.conf /opt/livy/conf/livy.conf

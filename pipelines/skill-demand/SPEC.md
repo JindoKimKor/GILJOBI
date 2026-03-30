@@ -437,8 +437,11 @@ LIMIT 20;
 | Seniority + skills    | Single LLM call                                  | Both need the same JD input — no reason to call twice                                           |
 | Skill storage         | Normalized `jd_skills` table                   | Enables `COUNT(*) GROUP BY skill` without unnesting arrays                                     |
 | LLM invocation        | Claude CLI subprocess                            | Subscription-based; same proven pattern as existing phase3 mapping code                          |
+| Spark job submission  | `@task` + `LivyHook` (not `LivyOperator`)       | Same Livy REST API, but custom polling loop fetches logs in real-time (10s interval)             |
 | Spark UDF             | Steps 2, 3, 4                                    | Distributes encoding/LLM calls across workers for scale                                          |
 | Checkpointing         | Per-batch JSON files                             | Resume interrupted LLM processing without restarting from scratch                                |
+| Spark infra separation | `docker-compose.spark-sd.yml` (separate cluster) | Dedicated worker image with sentence-transformers; isolated from matching-insights cluster        |
+| Spark resource lifecycle | Cluster → Workers → (jobs) → Workers down → Cluster down | Workers only alive during Spark jobs; Master+Livy stay longer for job submission                |
 
 ## Roadmap
 
@@ -451,20 +454,66 @@ LIMIT 20;
 | Download | `src/download.py` | ✅ 완료 | Kaggle API curl + unzip, idempotent |
 | V1 | `src/validators/v1_download.py` | ✅ 완료 | 파일 존재, 컬럼 검증, row count |
 | Step 1 | `src/step1_select_columns.py` | ✅ 완료 | job_id, company_name, title, description 추출 + parquet 저장 |
-| V2 | `src/validators/v2_extract.py` | 🔲 다음 | null, 중복 제거, description min length |
-| Step 2 | `src/step2_noc_normalize.py` | 🔲 | Sentence Transformers cosine similarity → NOC match |
-| V3 | `src/validators/v3_normalize.py` | 🔲 | threshold gate, match rate check |
-| Step 3 | `src/step3_noc_llm_fallback.py` | 🔲 | Claude Haiku CLI → sub-threshold NOC match |
-| V4 | `src/validators/v4_fallback.py` | 🔲 | NOC mapping completion rate |
-| Step 4 | `src/step4_extract.py` | 🔲 | Claude Haiku → seniority + skills[] 추출 |
-| V5 | `src/validators/v5_enrich.py` | 🔲 | seniority enum check, skills 비어있지 않은지 |
-| Step 5 | `src/step5_load.py` | 🔲 | jd_postings + jd_skills bulk insert |
-| DAG | `dags/skill_demand_dag.py` | 🔲 | Airflow DAG (LivyOperator) |
+| V2 | `src/validators/v2_extract.py` | ✅ 완료 | null drop, description min length |
+| Step 2 | `spark/step2_noc_spark.py` | ✅ 완료 | Sentence Transformers cosine similarity → NOC match (threshold 0.70, 16.7% matched) |
+| V3 | `src/validators/v3_normalize.py` | ✅ 완료 | match rate, split stats |
+| Step 3 | `spark/step3_4_llm_spark.py` | ⚠️ 재설계 필요 | 아래 Pipeline Redesign 참조 |
+| V4 | `src/validators/v4_fallback.py` | ✅ 완료 | NOC completion rate, method breakdown |
+| Step 4 | `src/step4_extract.py` | ⚠️ 재설계 필요 | Step 3에 합쳐질 예정 |
+| V5 | `src/validators/v5_enrich.py` | ✅ 완료 | seniority enum check, skills count |
+| Step 5 | `src/step5_load.py` | ✅ 완료 | jd_postings + jd_skills bulk insert |
+| DAG | `dags/skill_demand_dag.py` | ✅ 완료 | @task + LivyHook (실시간 로그), DAG params |
+| Infra | `docker-compose.spark-sd.yml` | ✅ 완료 | 별도 Spark cluster (ST + Claude CLI) |
 | main.py | `main.py` | ✅ 완료 | CLI orchestrator (pandas, 로컬 테스트용) |
 
 TDD 패턴: `test first (RED) → code (GREEN)` — 각 step마다 테스트 먼저 작성.
 
-테스트 현황: 25 tests passing (download 5 + step1 13 + v1 7)
+테스트 현황: 117 tests passing
+
+### Pipeline Redesign (결정됨, 구현 예정)
+
+**문제**: Step 2 (ST) threshold 0.70에서 16.7%만 매칭. 나머지 83%를 LLM fallback으로 개별 처리하면 103K LLM 호출 → 비용 과다.
+
+**근본 원인**: raw title이 지저분해서 ST가 매칭 못 함. 예: "Unix Manager in Jersey City, NJ - 3 days a week onsite" → NOC 매칭 실패.
+
+**해결**: matching-insights phase3 패턴 적용 — LLM으로 title normalization 후 ST 재매칭.
+
+**새 파이프라인 흐름**:
+```
+현재:    step1 → step2 (raw title → NOC via ST) → step3 (LLM NOC fallback) → step4 (seniority+skills)
+변경:    step1 → step2 (raw title → NOC via ST, threshold 0.70)
+           → matched (20K): NOC 확정, step4로
+           → unmatched (103K):
+               step3_NEW (LLM title normalize, company별 batch) → ST 재매칭
+           → step4 (seniority + skills, 전체 124K)
+           → step5 (DB load)
+```
+
+**LLM 호출 최적화 — Company별 Grouping**:
+
+| 데이터 | 수량 |
+|--------|------|
+| Unmatched rows | 103,070 |
+| Unique (title, company) pairs | 81,565 |
+| **Unique companies** | **21,165** |
+| Avg titles per company | 3.9 |
+
+**Company별로 묶어서 LLM 호출** — 같은 company의 titles를 한 번에 보냄:
+```
+"Company: Google. Normalize these job titles to standard NOC categories:
+- Software Engineer III
+- Staff SWE, Cloud Infrastructure
+- Senior Software Engineer, YouTube"
+→ 1 LLM call로 3개 처리
+```
+
+**Spark 활용**: `repartition("company_name")` → 같은 company가 같은 worker에 모여서 병렬 처리.
+
+**예상 LLM 호출**: ~21K (company 수) vs 현재 81K (pair별) — **74% 감소**
+
+**추가 최적화 후보**:
+- Step 3 (title normalize) + Step 4 (seniority + skills)를 하나의 LLM 호출로 합치기
+- 큰 company (600+ titles)는 내부적으로 50개씩 batch
 
 ### Phase 2: AWS 배포 (Terraform)
 

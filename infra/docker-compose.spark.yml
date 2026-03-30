@@ -14,6 +14,9 @@
 #
 # Config values (cores, memory, replicas) read from .env (symlinked from config/)
 # Airflow submits jobs via: LivyOperator → Livy :8998 → Spark Master → Workers
+#
+# Volume paths use ${INFRA_HOST_PATH} for Docker-in-Docker compatibility.
+# up.sh auto-resolves this to the host absolute path.
 # =============================================================================
 
 services:
@@ -32,14 +35,13 @@ services:
       - "7077:7077"                              # Spark cluster communication
       - "4040:4040"                              # Spark application UI
     volumes:
-      - ../data:/opt/spark/data
-      - ../pipelines/matching-insights/notebooks:/opt/spark/notebooks
-      - ../pipelines/matching-insights/config:/opt/spark/config
-      - ./jars:/opt/spark/jars/custom
-      - ./scripts/spark-entrypoint.sh:/opt/spark/scripts/entrypoint.sh
+      - ${INFRA_HOST_PATH:-.}/../data:/opt/spark/data
+      - ${INFRA_HOST_PATH:-.}/../pipelines:/opt/spark/pipelines
+      - ${INFRA_HOST_PATH:-.}/../pipelines/matching-insights/notebooks:/opt/spark/notebooks
+      - ${INFRA_HOST_PATH:-.}/../pipelines/matching-insights/config:/opt/spark/config
+      - ${INFRA_HOST_PATH:-.}/jars:/opt/spark/jars/custom
     environment:
       - SPARK_NO_DAEMONIZE=true
-    entrypoint: ["/bin/bash", "/opt/spark/scripts/entrypoint.sh"]
     command:
       ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
 
@@ -54,11 +56,11 @@ services:
     depends_on:
       - spark-master
     volumes:
-      - ../data:/opt/spark/data
-      - ../pipelines/matching-insights/notebooks:/opt/spark/notebooks
-      - ../pipelines/matching-insights/config:/opt/spark/config
-      - ./jars:/opt/spark/jars/custom
-      - ./scripts/spark-entrypoint.sh:/opt/spark/scripts/entrypoint.sh
+      - ${INFRA_HOST_PATH:-.}/../data:/opt/spark/data
+      - ${INFRA_HOST_PATH:-.}/../pipelines:/opt/spark/pipelines
+      - ${INFRA_HOST_PATH:-.}/../pipelines/matching-insights/notebooks:/opt/spark/notebooks
+      - ${INFRA_HOST_PATH:-.}/../pipelines/matching-insights/config:/opt/spark/config
+      - ${INFRA_HOST_PATH:-.}/jars:/opt/spark/jars/custom
     environment:
       - SPARK_MASTER=spark://spark-master:7077
       - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-1}
@@ -67,7 +69,6 @@ services:
       - PYSPARK_PYTHON=python3.11
     deploy:
       replicas: ${SPARK_WORKER_REPLICAS:-1}
-    entrypoint: ["/bin/bash", "/opt/spark/scripts/entrypoint.sh"]
     command:
       [
         "/opt/spark/bin/spark-class",
@@ -79,6 +80,7 @@ services:
   # Apache Livy
   # REST API for submitting Spark jobs from Airflow (LivyOperator).
   # API: http://localhost:8998
+  # livy.conf is baked into the image (see livy/Dockerfile)
   # ---------------------------------------------------------------------------
   livy:
     build: ./livy
@@ -88,10 +90,10 @@ services:
     environment:
       - SPARK_HOME=/opt/spark
     volumes:
-      - ../pipelines/matching-insights/notebooks:/opt/spark/notebooks
-      - ../data:/opt/spark/data
-      - ../pipelines/matching-insights/config:/opt/spark/config
-      - ./livy.conf:/opt/livy/conf/livy.conf
+      - ${INFRA_HOST_PATH:-.}/../pipelines:/opt/spark/pipelines
+      - ${INFRA_HOST_PATH:-.}/../pipelines/matching-insights/notebooks:/opt/spark/notebooks
+      - ${INFRA_HOST_PATH:-.}/../data:/opt/spark/data
+      - ${INFRA_HOST_PATH:-.}/../pipelines/matching-insights/config:/opt/spark/config
     depends_on:
       - spark-master
 

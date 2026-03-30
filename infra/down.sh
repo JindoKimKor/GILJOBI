@@ -25,15 +25,20 @@ EXTRA_ARGS=""
 
 for arg in "$@"; do
     case "$arg" in
-        postgres)    MODULES="$MODULES postgres" ;;
-        postgres-sd) MODULES="$MODULES postgres-sd" ;;
-        airflow)     MODULES="$MODULES airflow" ;;
-        spark)       MODULES="$MODULES spark" ;;
+        postgres)          MODULES="$MODULES postgres" ;;
+        postgres-sd)       MODULES="$MODULES postgres-sd" ;;
+        airflow)           MODULES="$MODULES airflow" ;;
+        spark)             MODULES="$MODULES spark" ;;
+        spark-cluster)     MODULES="$MODULES spark-cluster" ;;
+        spark-workers)     MODULES="$MODULES spark-workers" ;;
+        spark-sd)          MODULES="$MODULES spark-sd" ;;
+        spark-sd-cluster)  MODULES="$MODULES spark-sd-cluster" ;;
+        spark-sd-workers)  MODULES="$MODULES spark-sd-workers" ;;
         -v|--volumes) EXTRA_ARGS="$EXTRA_ARGS -v" ;;
         -h|--help)
             echo "Usage: ./down.sh [modules...] [-v]"
             echo ""
-            echo "Modules: postgres, postgres-sd, airflow, spark"
+            echo "Modules: postgres, postgres-sd, airflow, spark, spark-cluster, spark-workers"
             echo "  -v    Remove volumes (full reset, deletes data)"
             echo ""
             echo "Examples:"
@@ -51,7 +56,7 @@ done
 
 # If no modules specified, stop all
 if [ -z "$MODULES" ]; then
-    MODULES="postgres postgres-sd airflow spark"
+    MODULES="postgres postgres-sd airflow spark-workers spark-cluster spark-sd-workers spark-sd-cluster"
     echo "Stopping all modules..."
 else
     echo "Stopping: $MODULES"
@@ -78,6 +83,21 @@ for MODULE in $MODULES; do
             ;;
         spark)
             docker compose -p giljobi-spark -f docker-compose.spark.yml down $EXTRA_ARGS 2>&1 || true
+            ;;
+        spark-workers)
+            docker compose -p giljobi-spark -f docker-compose.spark.yml stop spark-worker 2>&1 || true
+            ;;
+        spark-cluster)
+            docker compose -p giljobi-spark -f docker-compose.spark.yml down $EXTRA_ARGS 2>&1 || true
+            ;;
+        spark-sd)
+            docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml down $EXTRA_ARGS 2>&1 || true
+            ;;
+        spark-sd-workers)
+            docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml stop spark-worker-sd 2>&1 || true
+            ;;
+        spark-sd-cluster)
+            docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml down $EXTRA_ARGS 2>&1 || true
             ;;
     esac
 done
