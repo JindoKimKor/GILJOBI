@@ -25,14 +25,15 @@ EXTRA_ARGS=""
 
 for arg in "$@"; do
     case "$arg" in
-        postgres) MODULES="$MODULES postgres" ;;
-        airflow)  MODULES="$MODULES airflow" ;;
-        spark)    MODULES="$MODULES spark" ;;
+        postgres)    MODULES="$MODULES postgres" ;;
+        postgres-sd) MODULES="$MODULES postgres-sd" ;;
+        airflow)     MODULES="$MODULES airflow" ;;
+        spark)       MODULES="$MODULES spark" ;;
         -v|--volumes) EXTRA_ARGS="$EXTRA_ARGS -v" ;;
         -h|--help)
             echo "Usage: ./down.sh [modules...] [-v]"
             echo ""
-            echo "Modules: postgres, airflow, spark"
+            echo "Modules: postgres, postgres-sd, airflow, spark"
             echo "  -v    Remove volumes (full reset, deletes data)"
             echo ""
             echo "Examples:"
@@ -50,7 +51,7 @@ done
 
 # If no modules specified, stop all
 if [ -z "$MODULES" ]; then
-    MODULES="postgres airflow spark"
+    MODULES="postgres postgres-sd airflow spark"
     echo "Stopping all modules..."
 else
     echo "Stopping: $MODULES"
@@ -68,6 +69,9 @@ for MODULE in $MODULES; do
     case "$MODULE" in
         postgres)
             docker compose -p market-trend-db -f docker-compose.postgres.yml down $EXTRA_ARGS 2>&1 || true
+            ;;
+        postgres-sd)
+            docker compose -p skill-demand-db -f docker-compose.postgres-sd.yml down $EXTRA_ARGS 2>&1 || true
             ;;
         airflow)
             docker compose -p giljobi-airflow -f docker-compose.airflow.yml down $EXTRA_ARGS 2>&1 || true
