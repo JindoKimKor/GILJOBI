@@ -64,15 +64,15 @@ with DAG(
         "batch_size": Param(10, type="integer", description="JDs per LLM call"),
         "batch_delay_sec": Param(5, type="integer", description="Seconds between LLM batches"),
         "max_batches_per_session": Param(50, type="integer", description="Max batches per session window"),
-        "session_cooldown_min": Param(60, type="integer", description="Minutes to wait for session reset after hitting limit"),
+        "session_cooldown_min": Param(300, type="integer", description="Minutes to wait for session reset after hitting limit"),
         # NOC matching
-        "noc_threshold": Param(0.75, type="number", description="Sentence Transformers cosine similarity threshold"),
+        "noc_threshold": Param(0.7, type="number", description="Sentence Transformers cosine similarity threshold"),
         # Spark resources — Step 2 (Sentence Transformers, memory-heavy)
         "step2_executor_memory": Param("2g", type="string", description="Step 2 executor memory (model loading)"),
-        "step2_executor_instances": Param(2, type="integer", description="Step 2 executor count"),
+        "step2_executor_instances": Param(4, type="integer", description="Step 2 executor count"),
         # Spark resources — Step 3+4 (LLM calls, IO-heavy)
-        "step3_4_executor_memory": Param("1g", type="string", description="Step 3+4 executor memory"),
-        "step3_4_executor_instances": Param(2, type="integer", description="Step 3+4 executor count"),
+        "step3_4_executor_memory": Param("0.5g", type="string", description="Step 3+4 executor memory"),
+        "step3_4_executor_instances": Param(16, type="integer", description="Step 3+4 executor count"),
     },
     doc_md="""
     ## Skill Demand Pipeline
@@ -290,10 +290,13 @@ with DAG(
         print(f"[STEP 2] Submitted batch {batch_id}")
 
         log_offset = 0
+        progress_dir = f"{PROCESSED_DIR}/step2/progress"
+        last_progress = ""
+
         while True:
             state = hook.get_batch_state(batch_id)
 
-            # Fetch and print new log lines
+            # Fetch and print new Livy log lines
             try:
                 log_response = hook.run_method(
                     endpoint=f"/batches/{batch_id}/log?from={log_offset}",
@@ -305,6 +308,27 @@ with DAG(
                         for line in lines:
                             print(line)
                         log_offset += len(lines)
+            except Exception:
+                pass
+
+            # Read worker progress files directly (same volume mount)
+            try:
+                import json
+                from pathlib import Path
+                total_done = 0
+                total_matched = 0
+                total_unmatched = 0
+                for pf in Path(progress_dir).glob("part_*.json"):
+                    with open(pf) as f:
+                        data = json.load(f)
+                        total_done += data.get("rows", 0)
+                        total_matched += data.get("matched", 0)
+                        total_unmatched += data.get("unmatched", 0)
+                if total_done > 0:
+                    msg = f"[STEP 2] Progress: {total_done}/123782 ({total_done/123782*100:.1f}%) — matched: {total_matched}, unmatched: {total_unmatched}"
+                    if msg != last_progress:
+                        print(msg)
+                        last_progress = msg
             except Exception:
                 pass
 
@@ -364,10 +388,13 @@ with DAG(
         print(f"[STEP 3+4] Submitted batch {batch_id}")
 
         log_offset = 0
+        checkpoint_dir = f"{PROCESSED_DIR}/step3_4/checkpoints"
+        last_progress = ""
+
         while True:
             state = hook.get_batch_state(batch_id)
 
-            # Fetch and print new log lines
+            # Fetch and print new Livy log lines
             try:
                 log_response = hook.run_method(
                     endpoint=f"/batches/{batch_id}/log?from={log_offset}",
@@ -379,6 +406,19 @@ with DAG(
                         for line in lines:
                             print(line)
                         log_offset += len(lines)
+            except Exception:
+                pass
+
+            # Read checkpoint files directly for progress
+            try:
+                from pathlib import Path
+                checkpoints = list(Path(checkpoint_dir).glob("batch_*.json"))
+                count = len(checkpoints)
+                if count > 0:
+                    msg = f"[STEP 3+4] Progress: {count} batches checkpointed"
+                    if msg != last_progress:
+                        print(msg)
+                        last_progress = msg
             except Exception:
                 pass
 
