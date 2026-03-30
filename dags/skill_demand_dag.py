@@ -63,7 +63,8 @@ with DAG(
         # LLM rate limiting
         "batch_size": Param(10, type="integer", description="JDs per LLM call"),
         "batch_delay_sec": Param(5, type="integer", description="Seconds between LLM batches"),
-        "max_batches_per_run": Param(50, type="integer", description="Max batches before stopping (checkpoint resume)"),
+        "max_batches_per_session": Param(50, type="integer", description="Max batches per session window"),
+        "session_cooldown_min": Param(60, type="integer", description="Minutes to wait for session reset after hitting limit"),
         # NOC matching
         "noc_threshold": Param(0.75, type="number", description="Sentence Transformers cosine similarity threshold"),
         # Spark resources — Step 2 (Sentence Transformers, memory-heavy)
@@ -239,7 +240,8 @@ with DAG(
         args=[
             "--batch-size", "{{ params.batch_size }}",
             "--batch-delay", "{{ params.batch_delay_sec }}",
-            "--max-batches", "{{ params.max_batches_per_run }}",
+            "--max-batches-per-session", "{{ params.max_batches_per_session }}",
+            "--session-cooldown-min", "{{ params.session_cooldown_min }}",
         ],
         livy_conn_id="livy_default",
         polling_interval=30,

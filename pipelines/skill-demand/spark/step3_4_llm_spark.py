@@ -26,8 +26,10 @@ parser.add_argument("--batch-size", type=int, default=10,
                     help="JDs per LLM call")
 parser.add_argument("--batch-delay", type=int, default=5,
                     help="Seconds between batches")
-parser.add_argument("--max-batches", type=int, default=50,
-                    help="Max batches per run (0 = unlimited)")
+parser.add_argument("--max-batches-per-session", type=int, default=50,
+                    help="Max batches per session window")
+parser.add_argument("--session-cooldown-min", type=int, default=60,
+                    help="Minutes to wait for session reset after hitting limit")
 parser.add_argument("--input", type=str,
                     default="/opt/airflow/data/processed/skill-demand/step2/step2_normalized.parquet")
 parser.add_argument("--output", type=str,
@@ -85,23 +87,10 @@ for cp in checkpoint_dir.glob("batch_*.json"):
     completed_ids.add(int(cp.stem.replace("batch_", "")))
 
 # =============================================================================
-# Assign batch IDs + skip completed
+# Assign batch IDs
 # =============================================================================
 df_pd["batch_id"] = df_pd.index // args.batch_size
 total_batches = int(df_pd["batch_id"].max()) + 1 if len(df_pd) > 0 else 0
-
-df_pending = df_pd[~df_pd["batch_id"].isin(completed_ids)].copy()
-remaining_batches = df_pending["batch_id"].nunique()
-
-print(f"[STEP 3+4] Total batches: {total_batches}")
-print(f"[STEP 3+4] Completed: {len(completed_ids)}")
-print(f"[STEP 3+4] Remaining: {remaining_batches}")
-
-# Apply max-batches limit
-if args.max_batches > 0 and remaining_batches > args.max_batches:
-    keep_ids = sorted(df_pending["batch_id"].unique())[:args.max_batches]
-    df_pending = df_pending[df_pending["batch_id"].isin(keep_ids)].copy()
-    print(f"[STEP 3+4] --max-batches={args.max_batches} → processing {len(keep_ids)} batches")
 
 # =============================================================================
 # Broadcast NOC data
@@ -244,24 +233,74 @@ Return JSON only: {{"seniority": "tier", "skills": ["skill1", "skill2"]}}"""
         time.sleep(args.batch_delay)
 
 # =============================================================================
-# Execute
+# Execute — Session Loop
 # =============================================================================
-if len(df_pending) == 0:
-    print("[STEP 3+4] All batches completed. Loading from checkpoints...")
-else:
-    pending_batches = df_pending["batch_id"].nunique()
-    df_spark = spark.createDataFrame(df_pending)
-    df_spark = df_spark.repartition(pending_batches, "batch_id")
+# Processes max_batches_per_session batches, then waits for cooldown,
+# then resumes from checkpoint. Repeats until all batches are done.
+# One DAG trigger → fully automatic completion.
+# =============================================================================
 
-    start = datetime.datetime.now()
-    print(f"[STEP 3+4] Start: {start.strftime('%H:%M:%S')}")
-    print(f"[STEP 3+4] Processing {pending_batches} batches...")
+session_number = 0
+pipeline_start = datetime.datetime.now()
+
+while True:
+    # Refresh completed checkpoints
+    completed_ids = set()
+    for cp in checkpoint_dir.glob("batch_*.json"):
+        completed_ids.add(int(cp.stem.replace("batch_", "")))
+
+    df_pending = df_pd[~df_pd["batch_id"].isin(completed_ids)].copy()
+    remaining_batches = df_pending["batch_id"].nunique()
+
+    print(f"\n[STEP 3+4] === Session {session_number + 1} ===")
+    print(f"  Total batches:  {total_batches}")
+    print(f"  Completed:      {len(completed_ids)}")
+    print(f"  Remaining:      {remaining_batches}")
+
+    if remaining_batches == 0:
+        print("[STEP 3+4] All batches completed!")
+        break
+
+    # Limit to max_batches_per_session
+    max_per_session = args.max_batches_per_session
+    if max_per_session > 0 and remaining_batches > max_per_session:
+        keep_ids = sorted(df_pending["batch_id"].unique())[:max_per_session]
+        df_pending = df_pending[df_pending["batch_id"].isin(keep_ids)].copy()
+        print(f"  This session:   {len(keep_ids)} batches (limit: {max_per_session})")
+
+    # Process session
+    pending_count = df_pending["batch_id"].nunique()
+    df_spark = spark.createDataFrame(df_pending)
+    df_spark = df_spark.repartition(pending_count, "batch_id")
+
+    session_start = datetime.datetime.now()
+    print(f"  Start:          {session_start.strftime('%H:%M:%S')}")
 
     result_rdd = df_spark.rdd.mapPartitions(process_partition)
     result_rdd.collect()
 
-    elapsed = datetime.datetime.now() - start
-    print(f"[STEP 3+4] Done: {elapsed}")
+    session_elapsed = datetime.datetime.now() - session_start
+    session_number += 1
+    print(f"  Elapsed:        {session_elapsed}")
+
+    # Check if more batches remain
+    completed_after = set()
+    for cp in checkpoint_dir.glob("batch_*.json"):
+        completed_after.add(int(cp.stem.replace("batch_", "")))
+    still_remaining = total_batches - len(completed_after)
+
+    if still_remaining == 0:
+        print("[STEP 3+4] All batches completed!")
+        break
+
+    # Session cooldown
+    cooldown_sec = args.session_cooldown_min * 60
+    print(f"\n[STEP 3+4] Session limit reached. {still_remaining} batches remaining.")
+    print(f"[STEP 3+4] Waiting {args.session_cooldown_min} min for session reset...")
+    time.sleep(cooldown_sec)
+
+pipeline_elapsed = datetime.datetime.now() - pipeline_start
+print(f"\n[STEP 3+4] Pipeline complete in {session_number} sessions, {pipeline_elapsed} total.")
 
 # =============================================================================
 # Collect checkpoints → save output parquet
