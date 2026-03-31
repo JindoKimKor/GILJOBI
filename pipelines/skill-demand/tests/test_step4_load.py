@@ -1,5 +1,5 @@
 """
-Tests for skill-demand pipeline STEP 5 — DB Load.
+Tests for skill-demand pipeline STEP 4 — DB Load.
 Based on SPEC.md — Bulk insert jd_postings + explode skills into jd_skills.
 
 Tests use mock DB connection to verify SQL generation and data flow.
@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock, call
 
-from src.step5_load import (
+from src.step4_load import (
     prepare_postings_rows,
     prepare_skills_rows,
     POSTINGS_COLUMNS,
@@ -77,15 +77,19 @@ class TestPrepareSkillsRows:
 
     def test_explodes_skills(self):
         data = [
-            {"job_id": 1, "skills": ["python", "aws", "docker"]},
-            {"job_id": 2, "skills": ["java"]},
+            {"job_id": 1, "skills": [
+                {"name": "python", "category": "hard_skill"},
+                {"name": "aws", "category": "tool"},
+                {"name": "docker", "category": "tool"},
+            ]},
+            {"job_id": 2, "skills": [{"name": "java", "category": "hard_skill"}]},
         ]
         rows = prepare_skills_rows(data)
         assert len(rows) == 4
-        assert rows[0] == {"job_id": 1, "skill": "python"}
-        assert rows[1] == {"job_id": 1, "skill": "aws"}
-        assert rows[2] == {"job_id": 1, "skill": "docker"}
-        assert rows[3] == {"job_id": 2, "skill": "java"}
+        assert rows[0] == {"job_id": 1, "skill": "python", "category": "hard_skill"}
+        assert rows[1] == {"job_id": 1, "skill": "aws", "category": "tool"}
+        assert rows[2] == {"job_id": 1, "skill": "docker", "category": "tool"}
+        assert rows[3] == {"job_id": 2, "skill": "java", "category": "hard_skill"}
 
     def test_empty_skills_produces_no_rows(self):
         data = [
@@ -115,7 +119,7 @@ class TestPrepareSkillsRows:
 class TestConfig:
     def test_postings_columns_defined(self):
         expected = [
-            "company", "raw_title", "noc_id", "noc_match_score",
+            "job_id", "company", "raw_title", "noc_id", "noc_match_score",
             "noc_match_method", "seniority", "description",
         ]
         assert POSTINGS_COLUMNS == expected

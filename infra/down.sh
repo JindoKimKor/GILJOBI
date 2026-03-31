@@ -81,15 +81,6 @@ for MODULE in $MODULES; do
         airflow)
             docker compose -p giljobi-airflow -f docker-compose.airflow.yml down $EXTRA_ARGS 2>&1 || true
             ;;
-        spark)
-            docker compose -p giljobi-spark -f docker-compose.spark.yml down $EXTRA_ARGS 2>&1 || true
-            ;;
-        spark-workers)
-            docker compose -p giljobi-spark -f docker-compose.spark.yml stop spark-worker 2>&1 || true
-            ;;
-        spark-cluster)
-            docker compose -p giljobi-spark -f docker-compose.spark.yml down $EXTRA_ARGS 2>&1 || true
-            ;;
         spark-sd)
             docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml down $EXTRA_ARGS 2>&1 || true
             ;;

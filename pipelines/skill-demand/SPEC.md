@@ -54,18 +54,16 @@ Step 1: Extract columns (job_id, company_name, title, description, formatted_exp
   ↓ V1 (file integrity) → V2 (null/length)
 Step 2: ST NOC Match (Sentence Transformers, threshold 0.65)
   + Seniority: formatted_experience_level → title keywords → remaining for LLM
-  ↓ V3 (match rate)
-  ├─ matched (25.7%): NOC + seniority confirmed → Step 4
-  └─ unmatched (74.3%): → Step 3
-Step 3: LLM NOC Match (Claude Haiku, full NOC list 510개)
-  + seniority (if missing) + skills — all in one LLM call
-  Adaptive Batch Strategy (company-grouped)
-  ↓ V4 (completion rate)
-Step 4: LLM Skills Extraction (Step 2 matched only — need skills + missing seniority)
-  ↓
-Merge: Step 2 matched + Step 3 results + Step 4 results
-  ↓
-Step 5: DB Load (jd_postings + jd_skills)
+  ↓ V3 (match rate + seniority stats)
+  ├─ matched (25.9%): NOC + seniority → Step 3 (skills extraction)
+  └─ unmatched (74.1%): → Step 3 (NOC + skills + seniority)
+Step 3: LLM Enrich — ALL rows processed with 2 prompt types:
+  ├─ unmatched: NOC list + JD → NOC + seniority(if missing) + skills (5/call)
+  └─ matched: JD → seniority(if missing) + skills (10/call)
+  Adaptive Batch Strategy (similarity-based grouping)
+  Skills categorized: hard_skill, soft_skill, tool, certification
+  ↓ V4 (completion rate) → V5 (seniority + skills validation)
+Step 5: DB Load (jd_postings + jd_skills with category)
 ```
 
 ### DAG Task Flow (Airflow)
@@ -75,8 +73,7 @@ ensure_db → noc_setup → download → validate_file_integrity → step1_extra
   → start_spark_cluster (Master + Livy)
   → start_spark_workers (Workers)
   → step2_noc_match_st → validate_noc_match_rate
-  → step3_title_normalize_llm → validate_noc_completion
-  → step4 (🔲 구현 예정)
+  → step3_enrich → validate_noc_completion → validate_seniority_and_skills
   → stop_spark_workers
   → step5_load
   → stop_spark_cluster
@@ -206,92 +203,85 @@ Null                29,409
 - Progress files: worker writes JSON → Airflow reads directly (not via Livy stdout)
 - `HF_HUB_DISABLE_PROGRESS_BARS=1`: prevent Livy LineBufferedStream encoding crash
 
-### Step 3 — LLM NOC Match + Seniority + Skills (`spark/step3_title_normalize_llm_spark.py`)
+### Step 3 — LLM Enrich: NOC + Seniority + Skills (`spark/step3_enrich_spark.py`)
 
 | | Value |
 |---|---|
-| Input | Step 2 unmatched rows |
-| Output | `processed/step3/step3_normalized.parquet` (merged with Step 2 matched) |
+| Input | Step 2 output (ALL rows — matched + unmatched) |
+| Output | `processed/step3/step3_enriched.parquet` |
 | Model | Claude Haiku CLI (subscription, `HOME=/tmp` for credentials) |
 
-LLM prompt includes:
-- Company name (context)
-- Job title(s)
-- Full NOC list (510 categories)
-- Request: pick best NOC or null + seniority + skills
+**2 prompt types** based on NOC match status from Step 2:
 
-`noc_match_method = "llm_noc_match"`, `noc_match_score = None` (LLM doesn't give numeric score)
-
-**Sample results (721 rows):**
-```
-Total:              721
-Step 2 matched:     185 (25.7%) — ST, threshold 0.65
-Step 3 matched:     521 (72.3%) — LLM NOC match
-Step 3 null:         15 (2.1%) — LLM said no match
-Total NOC:          706 (97.9%)
-Time:               ~17 minutes
-```
-
-#### Adaptive Batch Strategy
-
-LLM calls optimized by company size. Brute force 103K → **1,758 calls (98% reduction)**.
-
-| Company Size | Companies | Strategy | Titles/Call | LLM Calls |
+| Prompt Type | Target Rows | Includes NOC List | Batch Size | Extracts |
 |---|---|---|---|---|
-| >=30 titles | 376 | 1 company per call, 50 titles/batch | ~50 | ~653 |
-| 10-29 titles | 819 | 2-3 companies per call | 30-57 | ~273 |
-| 1-9 titles | 20,653 | Mixed batch, 40 titles/call | ~40 | ~692 |
-| **Total** | | | | **~1,758** |
+| **unmatched** | noc_id = null (74.1%) | ✅ 510 categories | 5/call | NOC + seniority + skills |
+| **matched** | noc_id filled (25.9%) | ❌ | 10/call | seniority + skills |
 
-**Brute force comparison:**
+**Seniority handling per row (within same batch):**
+- Already filled (82.5%) → prompt says "Seniority: {tier} (already determined - skip)"
+- Missing (17.5%) → prompt says "Seniority: missing - determine from description"
 
-| Method | LLM Calls |
-|------|-----------|
-| Row-by-row | 103,070 |
-| Unique (title, company) pair | 81,565 |
-| Unique title only | 66,419 |
-| Company-by-company | 21,165 |
-| **Adaptive Batch** | **1,758** |
+LLM receives per-row seniority status and acts accordingly.
 
-**Design rationale:**
-- >=30 titles: Large companies (Amazon 286, TEKsystems 395). Company context improves LLM accuracy. Internal 50-title batching.
-- 10-29 titles: 2-3 companies per call — still fits in one prompt with company labels.
-- 1-9 titles: 20,653 companies, mostly 1-2 titles. Company context adds little value. Batch 40 titles with company name as reference.
+**Skill categories (4 types):**
+```
+- hard_skill: domain-specific technical knowledge, programming languages (e.g. Python, data modeling, welding)
+- soft_skill: interpersonal and behavioral (e.g. communication, leadership, teamwork)
+- tool: software, platform, system (e.g. Excel, SAP, Docker, AWS, Kubernetes)
+- certification: formal credential or license (e.g. CPA, PMP, AWS Certified)
+```
+
+**Seniority guide (provided to LLM):**
+```
+- intern: internship, co-op, student placement
+- entry_level: junior, graduate, trainee
+- mid_level: intermediate, mid-level
+- senior: senior, lead, principal, staff
+- executive: director, VP, C-level, head of
+```
+
+`noc_match_method = "llm_noc_match"` for unmatched rows. `noc_match_score = None` (LLM doesn't give numeric score).
+
+#### Adaptive Batch Strategy — Similarity-Based Grouping
+
+LLM accuracy improves when similar JDs are batched together. Grouping priority:
+
+**Matched rows (10/call):**
+
+| Priority | Grouping | Rationale |
+|---|---|---|
+| 1st | Same company + same noc_id | Same company, same position → nearly identical JDs |
+| 2nd | Same noc_id (different companies) | Same occupation → similar skill requirements |
+| 3rd | Remaining | Fill batch by size |
+
+**Unmatched rows (5/call):**
+
+| Priority | Grouping | Rationale |
+|---|---|---|
+| 1st | Same company | Same company → similar JD writing style |
+| 2nd | Remaining | Fill batch by size |
+
+Each group fills batches up to the batch size limit. Rows that don't fill a complete batch in higher-priority groups fall through to lower-priority groups.
 
 **Spark features:**
 - `repartition("company_name")`: same company → same worker
-- `mapPartitions` + `groupby`: adaptive processing per company size
-- Checkpoint: per-company JSON files → resume on failure
-- Progress: per-company JSON → Airflow reads directly
-- Data-aware Partitioning: processing strategy changes dynamically based on data characteristics
-
-### Step 4 — LLM Skills Extraction (🔲 구현 예정)
-
-| | Value |
-|---|---|
-| Input | Step 2 matched rows (have NOC + seniority, need skills) |
-| Output | Enriched with `skills[]`, missing `seniority` filled |
-| Model | Claude Haiku CLI |
-
-Step 2 matched rows already have NOC and seniority but no skills.
-LLM reads JD → extracts skills. If seniority missing (18.7%), extracts that too.
-Adaptive Batch Strategy reusable.
-
-**Design question (to decide):**
-- Can Step 3 prompt (NOC + seniority + skills) be reused for Step 4 (skills + seniority only)?
-- Or simpler separate prompt: "Extract skills from this JD"
+- `mapPartitions`: classify rows → group by priority → batch → LLM call
+- Checkpoint: per-batch JSON files → resume on failure
+- Progress: per-batch JSON → Airflow reads directly
+- Session loop: `max_batches_per_session` → cooldown → resume (rate limit handling)
 
 ### Step 5 — DB Load (`src/step5_load.py`)
 
 | | Value |
 |---|---|
-| Input | Merged parquet (Step 2 matched + Step 3 results + Step 4 results) |
+| Input | `processed/step3/step3_enriched.parquet` (all rows with NOC + seniority + skills) |
 | Output | `jd_postings` + `jd_skills` tables in PostgreSQL |
 
 - Bulk insert `jd_postings` (one row per job posting)
-- Explode `skills[]` array → bulk insert `jd_skills` (one row per skill per posting)
+- Explode `skills[]` array → bulk insert `jd_skills` (one row per skill per posting, with category)
 - `ON CONFLICT DO NOTHING` for idempotent reruns
-- Schema created by `main.py ensure_schema()` or DAG `noc_setup` task
+- Schema created by `schema.sql` file
 
 ## Infrastructure
 
@@ -353,15 +343,16 @@ start_spark_cluster (Master + Livy only)
 | Column | Type | Constraint | Description |
 |---|---|---|---|
 | `id` | SERIAL | PRIMARY KEY | |
-| `jd_id` | INT | FK → jd_postings(id) | |
-| `skill` | VARCHAR(100) | NOT NULL | Lowercase (e.g. "python", "aws") |
+| `jd_id` | INT | FK → jd_postings(job_id) | |
+| `skill` | VARCHAR(100) | NOT NULL | Lowercase (e.g. "python", "data modeling") |
+| `category` | VARCHAR(20) | NOT NULL | `hard_skill`, `soft_skill`, `tool`, `certification` |
 
 ### View: `skill_demand_summary`
 
 ```sql
-SELECT noc21_name, seniority, skill, demand_count
+SELECT noc21_name, seniority, skill, category, demand_count
 FROM skill_demand_summary
-WHERE noc21_name ILIKE '%software%'
+WHERE noc21_name ILIKE '%software%' AND category = 'hard_skill'
 ORDER BY demand_count DESC
 LIMIT 20;
 ```
@@ -373,9 +364,10 @@ LIMIT 20;
 | Data source | `arshkon/linkedin-job-postings` (Kaggle) | 124K postings, single CSV with all needed columns |
 | NOC primary match | Sentence Transformers (0.65) | Fast, free, local. Filters 25.7% confidently |
 | NOC fallback | LLM with full NOC list (510) | 97.9% total. Tried: normalize+re-match (36.8%), ST+JD (worse) |
-| Seniority | 3-tier: CSV (76.3%) → keyword (6.2%) → LLM (18.7%) | Minimize LLM usage |
-| Skills | LLM from JD | No alternative — JD parsing required |
-| Batch strategy | Adaptive by company size | 98% reduction (103K → 1,758 calls) |
+| Seniority | 3-tier: CSV (76.3%) → keyword (6.2%) → LLM (17.5%) | Minimize LLM usage, word boundary matching |
+| Skills | LLM from JD, 4 categories | hard_skill, soft_skill, tool, certification |
+| Step 3 design | 2 prompts (matched/unmatched), not 4 | Seniority handled per-row within prompt |
+| Batch strategy | Similarity-based grouping | Company + noc_id grouping for accuracy |
 | Spark submission | `@task + LivyHook` | Real-time log (vs LivyOperator state-only) |
 | Progress | Airflow reads worker files directly | Livy stdout unreliable (encoding/threading/blocking) |
 | Spark infra | Separate cluster (`spark-sd`) | Different packages than matching-insights |
@@ -392,14 +384,13 @@ LIMIT 20;
 | Step 1 | ✅ | Column extraction + parquet |
 | Step 2 | ✅ | ST NOC match (0.65) + seniority (CSV + keyword) |
 | V3 | ✅ | Match rate stats |
-| Step 3 | ✅ | LLM NOC match + Adaptive Batch (97.9% on sample) |
-| V4 | ✅ | Completion rate (97.9%) |
-| **Step 4** | **🔲** | **Skills extraction + remaining seniority — redesign in progress** |
+| Step 3 | 🔲 | LLM Enrich: NOC + seniority + skills (2 prompts, similarity-based batch) |
+| V4 | ✅ | Completion rate |
 | V5 | ✅ | Seniority/skills validation (code ready) |
-| Step 5 | 🔲 | DB load (path update needed for new flow) |
+| Step 5 | 🔲 | DB load (path + schema update needed) |
 | DAG | ✅ | Full orchestration with resource lifecycle |
 | Infra | ✅ | Separate Spark-SD cluster |
-| Tests | 133 passing | |
+| Tests | 206 passing | step1(15) + step2_seniority(43) + step2_noc(11) + step3_enrich(36) + others |
 
 ### Phase 2: AWS (Terraform)
 

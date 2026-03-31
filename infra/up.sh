@@ -65,9 +65,6 @@ show_usage() {
     echo "  postgres        Pipeline data DB (market-trend)"
     echo "  postgres-sd     Skill-demand DB (separate)"
     echo "  airflow         Airflow + Redis + metadata DB"
-    echo "  spark              Spark Master + Workers + Livy (matching-insights)"
-    echo "  spark-cluster      Spark Master + Livy only (matching-insights)"
-    echo "  spark-workers      Spark Workers only (matching-insights)"
     echo "  spark-sd           Spark cluster for skill-demand (all)"
     echo "  spark-sd-cluster   Spark Master + Livy only (skill-demand)"
     echo "  spark-sd-workers   Spark Workers only (skill-demand)"
@@ -157,8 +154,6 @@ if [ "$NO_CACHE" = "true" ]; then
             postgres)       docker compose -p market-trend-db -f docker-compose.postgres.yml build --no-cache ;;
             postgres-sd)    docker compose -p skill-demand-db -f docker-compose.postgres-sd.yml build --no-cache ;;
             airflow)        docker compose -p giljobi-airflow -f docker-compose.airflow.yml build --no-cache ;;
-            spark|spark-cluster|spark-workers)
-                            docker compose -p giljobi-spark -f docker-compose.spark.yml build --no-cache ;;
             spark-sd|spark-sd-cluster|spark-sd-workers)
                             docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml build --no-cache ;;
         esac
@@ -172,9 +167,9 @@ fi
 #   📁 giljobi-airflow       (airflow-db, redis, webserver, scheduler, worker)
 #   📁 market-trend-db       (postgres — market-trend)
 #   📁 skill-demand-db       (postgres — skill-demand)
-#   📁 giljobi-spark         (spark-master, spark-worker, livy)
-#       spark-cluster = master + livy only
-#       spark-workers = workers only (requires spark-cluster)
+#   📁 giljobi-spark-sd      (spark-master-sd, spark-worker-sd, livy-sd)
+#       spark-sd-cluster = master + livy only
+#       spark-sd-workers = workers only (requires spark-sd-cluster)
 # =============================================================================
 
 echo "=== Giljobi Infrastructure ==="
@@ -187,9 +182,6 @@ for MODULE in $MODULES; do
         postgres)       docker compose -p market-trend-db -f docker-compose.postgres.yml up -d --wait $BUILD_FLAG ;;
         postgres-sd)    docker compose -p skill-demand-db -f docker-compose.postgres-sd.yml up -d --wait $BUILD_FLAG ;;
         airflow)        docker compose -p giljobi-airflow -f docker-compose.airflow.yml up -d --wait $BUILD_FLAG ;;
-        spark)             docker compose -p giljobi-spark -f docker-compose.spark.yml up -d --wait $BUILD_FLAG ;;
-        spark-cluster)     docker compose -p giljobi-spark -f docker-compose.spark.yml up -d spark-master livy --wait $BUILD_FLAG ;;
-        spark-workers)     docker compose -p giljobi-spark -f docker-compose.spark.yml up -d spark-worker $BUILD_FLAG ;;
         spark-sd)          docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml up -d --wait $BUILD_FLAG ;;
         spark-sd-cluster)  docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml up -d spark-master-sd livy-sd --wait $BUILD_FLAG ;;
         spark-sd-workers)  docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml up -d spark-worker-sd $BUILD_FLAG ;;
