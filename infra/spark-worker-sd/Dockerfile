@@ -43,7 +43,7 @@ RUN python3.11 -m pip install --no-cache-dir \
 
 # -----------------------------------------------------------------------------
 # 3. Node.js + Claude CLI (for Step 3+4 LLM calls)
-#    Same setup as matching-insights Dockerfile.spark-llm-onet-worker
+#    Claude CLI for LLM-based skill extraction (Step 3+4)
 # -----------------------------------------------------------------------------
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \

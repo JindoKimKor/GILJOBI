@@ -6,9 +6,10 @@
 # is read from .env, which is symlinked from config/.env.{environment}.
 #
 # Modules:
-#   postgres  — Pipeline data DB (local development)
-#   airflow   — Airflow + Redis + Airflow-DB (orchestration)
-#   spark     — Spark + Livy (distributed processing)
+#   postgres     — Pipeline data DB (market-trend)
+#   postgres-sd  — Skill-demand DB (separate)
+#   airflow      — Airflow + Redis + Airflow-DB (orchestration)
+#   spark-sd     — Spark + Livy (skill-demand)
 #
 # Options:
 #   --build      Rebuild Docker images before starting
@@ -17,7 +18,7 @@
 # Usage:
 #   ./up.sh airflow                    # Orchestration only (DAGs manage infra)
 #   ./up.sh postgres                   # Pipeline DB only (manual py main.py)
-#   ./up.sh airflow spark              # Orchestration + distributed processing
+#   ./up.sh airflow spark-sd           # Orchestration + distributed processing
 #   ./up.sh airflow --build            # Rebuild changed images
 #   ./up.sh airflow --no-cache         # Full rebuild from scratch
 #
@@ -80,7 +81,7 @@ show_usage() {
     echo "Examples:"
     echo "  ./up.sh airflow                # Start Airflow (DAGs manage rest)"
     echo "  ./up.sh postgres airflow       # DB + Airflow"
-    echo "  ./up.sh airflow spark          # Airflow + Spark"
+    echo "  ./up.sh airflow spark-sd       # Airflow + Spark (skill-demand)"
     echo "  ./up.sh airflow --no-cache     # Rebuild from scratch"
     exit 1
 }
@@ -91,7 +92,7 @@ fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        postgres|postgres-sd|airflow|spark|spark-cluster|spark-workers|spark-sd|spark-sd-cluster|spark-sd-workers)
+        postgres|postgres-sd|airflow|spark-sd|spark-sd-cluster|spark-sd-workers)
             MODULES="$MODULES $1"
             shift
             ;;

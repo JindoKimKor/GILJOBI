@@ -9,10 +9,10 @@
 #   ./up.sh spark-sd-cluster       # Master + Livy only
 #   ./up.sh spark-sd-workers       # Workers only
 #
-# Differences from docker-compose.spark.yml (matching-insights):
+# Spark cluster for skill-demand pipeline:
 #   - Worker image includes sentence-transformers, numpy, psycopg2
 #   - Mounts skill-demand pipelines + data
-#   - Separate project name (giljobi-spark-sd) for Docker Desktop grouping
+#   - Project name: giljobi-spark-sd (Docker Desktop grouping)
 #
 # Volume paths use ${INFRA_HOST_PATH} for Docker-in-Docker compatibility.
 # =============================================================================

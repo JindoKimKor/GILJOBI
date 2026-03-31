@@ -202,7 +202,7 @@ Spark is used for the TRANSFORM and LOAD stages via LivyOperator.
 
 | Service | Compose File | How it starts |
 |---------|-------------|---------------|
-| Spark master + workers + Livy | `docker-compose.spark.yml` | Automatic: DAG `ensure_spark` task |
+| Spark master + workers + Livy | `docker-compose.spark-sd.yml` | Automatic: DAG `ensure_spark` task (skill-demand only) |
 
 ### Configuration
 

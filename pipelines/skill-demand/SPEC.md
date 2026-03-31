@@ -62,8 +62,8 @@ Step 3: LLM Enrich — ALL rows processed with 2 prompt types:
   └─ matched: JD → seniority(if missing) + skills (10/call)
   Adaptive Batch Strategy (similarity-based grouping)
   Skills categorized: hard_skill, soft_skill, tool, certification
-  ↓ V4 (completion rate) → V5 (seniority + skills validation)
-Step 5: DB Load (jd_postings + jd_skills with category)
+  ↓ V4 (NOC + seniority + skills validation)
+Step 4: DB Load (jd_postings + jd_skills with category)
 ```
 
 ### DAG Task Flow (Airflow)
@@ -73,9 +73,9 @@ ensure_db → noc_setup → download → validate_file_integrity → step1_extra
   → start_spark_cluster (Master + Livy)
   → start_spark_workers (Workers)
   → step2_noc_match_st → validate_noc_match_rate
-  → step3_enrich → validate_noc_completion → validate_seniority_and_skills
+  → step3_enrich → validate_enrich
   → stop_spark_workers
-  → step5_load
+  → step4_load
   → stop_spark_cluster
 ```
 
@@ -174,7 +174,7 @@ Three approaches were tested before the final design:
 |---|---|---|
 | 1st | `formatted_experience_level` from CSV | 76.3% (94,440/123,849) |
 | 2nd | Title keyword matching | +6.2% (6,192 additional) |
-| 3rd | LLM (Step 3 or Step 4) | 18.7% remaining (23,217) |
+| 3rd | LLM (Step 3) | 18.7% remaining (23,217) |
 
 Title keyword rules:
 ```
@@ -271,7 +271,7 @@ Each group fills batches up to the batch size limit. Rows that don't fill a comp
 - Progress: per-batch JSON → Airflow reads directly
 - Session loop: `max_batches_per_session` → cooldown → resume (rate limit handling)
 
-### Step 5 — DB Load (`src/step5_load.py`)
+### Step 4 — DB Load (`src/step4_load.py`)
 
 | | Value |
 |---|---|
@@ -295,7 +295,7 @@ Each group fills batches up to the batch size limit. Rows that don't fill a comp
 | Spark SD Workers | `docker-compose.spark-sd.yml` | DAG: `start_spark_workers` | - |
 | Livy SD | `docker-compose.spark-sd.yml` | DAG: `start_spark_cluster` | 8999 |
 
-**Separate from matching-insights:** Dedicated Spark cluster (`giljobi-spark-sd`) with:
+**Dedicated Spark cluster** (`giljobi-spark-sd`) with:
 - `spark-worker-sd/Dockerfile`: Python 3.11 + sentence-transformers + PyTorch + Claude CLI + Node.js
 - `livy-sd/Dockerfile`: Same packages for driver + `JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"`
 
@@ -305,7 +305,7 @@ start_spark_cluster (Master + Livy only)
   → start_spark_workers (Workers — alive only during Spark jobs)
     → [Step 2 + Step 3 Spark jobs]
   → stop_spark_workers (free resources)
-  → [Step 5 DB load — no Spark needed]
+  → [Step 4 DB load — no Spark needed]
 → stop_spark_cluster (cleanup)
 ```
 
@@ -370,7 +370,7 @@ LIMIT 20;
 | Batch strategy | Similarity-based grouping | Company + noc_id grouping for accuracy |
 | Spark submission | `@task + LivyHook` | Real-time log (vs LivyOperator state-only) |
 | Progress | Airflow reads worker files directly | Livy stdout unreliable (encoding/threading/blocking) |
-| Spark infra | Separate cluster (`spark-sd`) | Different packages than matching-insights |
+| Spark infra | Dedicated cluster (`spark-sd`) | Separate Dockerfiles with sentence-transformers + Claude CLI |
 | LLM auth | `~/.claude:/tmp/.claude` mount, `HOME=/tmp` | Claude CLI subscription credentials |
 
 ## Roadmap
@@ -387,7 +387,7 @@ LIMIT 20;
 | Step 3 | 🔲 | LLM Enrich: NOC + seniority + skills (2 prompts, similarity-based batch) |
 | V4 | ✅ | Completion rate |
 | V5 | ✅ | Seniority/skills validation (code ready) |
-| Step 5 | 🔲 | DB load (path + schema update needed) |
+| Step 4 | ✅ | DB load (BIGINT PK, skill category, schema.sql) |
 | DAG | ✅ | Full orchestration with resource lifecycle |
 | Infra | ✅ | Separate Spark-SD cluster |
 | Tests | 206 passing | step1(15) + step2_seniority(43) + step2_noc(11) + step3_enrich(36) + others |

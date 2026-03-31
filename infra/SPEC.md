@@ -119,9 +119,9 @@ flowchart TB
     linkStyle 9,10 stroke:#0d9488,stroke-width:2px
 ```
 
-### Step 2b: DAG Execution — Matching Insights Stream (Under Construction)
+### Step 2b: DAG Execution — Skill Demand Stream
 
-When `matching_insights_preprocessing` DAG is triggered. Uses Spark only — DB is TBD (may be separate from market-trend).
+When `skill_demand_pipeline` DAG is triggered. Uses Spark + separate DB (port 5434).
 
 ```mermaid
 flowchart TB
@@ -137,15 +137,15 @@ flowchart TB
     end
 
     SOCK(["docker.sock"]):::iface
-    UPSH_SPARK[["up.sh spark"]]:::abs
+    UPSH_SPARK[["up.sh spark-sd"]]:::abs
 
-    subgraph SparkCluster["📁 giljobi-spark — created by DAG"]
+    subgraph SparkCluster["📁 giljobi-spark-sd — created by DAG"]
         LIVY(["Livy :8998"]):::iface
         SM["spark-master :8080"]:::cls
         SW["spark-worker × N"]:::cls
     end
 
-    DB_TBD["DB — TBD<br/>(separate from market-trend)"]
+    SD_DB["📁 skill-demand-db<br/>PostgreSQL :5434"]
 
     NET{{"giljobi-network"}}
 
@@ -153,18 +153,18 @@ flowchart TB
 
     C_SPARK{{"«contract» ensure_spark<br/>Start on demand<br/>Stop after job"}}:::contract
 
-    AW -- "1. up.sh spark" --> UPSH_SPARK
+    AW -- "1. up.sh spark-sd" --> UPSH_SPARK
     UPSH_SPARK -- "via" --> SOCK
     SOCK --> C_SPARK --> SM
     SM --> SW
     LIVY -- "2. submit jobs" --> SM
-    LIVY -. "3. write results" .-> DB_TBD
+    LIVY -. "3. write results" .-> SD_DB
 
     Airflow --- NET
     SparkCluster --- NET
 
     style ENGINE fill:none,stroke:#888,stroke-width:2px,stroke-dasharray:5,color:#888
-    style DB_TBD fill:none,stroke:#888,stroke-width:2px,stroke-dasharray:5,color:#888
+    style SD_DB fill:#BF360C,color:#fff
     linkStyle 0,1 stroke:#f97316,stroke-width:2px
     linkStyle 2,3 stroke:#9C27B0,stroke-width:2px
     linkStyle 4 stroke:#22c55e,stroke-width:2px
@@ -188,20 +188,21 @@ Each compose file is an independent module. Streams pick only what they need:
 | Module | Compose File | Lifecycle | Used by |
 |--------|-------------|-----------|---------|
 | **Airflow** | `docker-compose.airflow.yml` | Always on (manual start) | All streams |
-| **Pipeline DB** | `docker-compose.postgres.yml` | ensure pattern (DAG starts, never stops) | market-trend, matching-insights |
-| **Spark + Livy** | `docker-compose.spark.yml` | On-demand (DAG starts, DAG stops) | matching-insights only |
+| **Pipeline DB** | `docker-compose.postgres.yml` | ensure pattern (DAG starts, never stops) | market-trend |
+| **Skill Demand DB** | `docker-compose.postgres-sd.yml` | ensure pattern (DAG starts, never stops) | skill-demand |
+| **Spark + Livy** | `docker-compose.spark-sd.yml` | On-demand (DAG starts, DAG stops) | skill-demand only |
 
 ### What each stream uses
 
 | Stream | Airflow | Pipeline DB | Spark |
 |--------|:-------:|:-----------:|:-----:|
-| **market-trend** | yes | yes | no |
-| **matching-insights** | yes | yes | yes |
+| **market-trend** | yes | yes (postgres) | no |
+| **skill-demand** | yes | yes (postgres-sd) | yes (spark-sd) |
 | *future stream* | yes | maybe | maybe |
 
 ### Benefits
 
-- **No unnecessary services** — market-trend doesn't start Spark (saves 8GB+ RAM)
+- **No unnecessary services** — market-trend doesn't start Spark or skill-demand DB (saves 8GB+ RAM)
 - **Independent scaling** — Airflow workers for I/O, Spark workers for compute
 - **Failure isolation** — Spark crash doesn't take down Airflow or DB
 - **Config-driven** — change replicas/memory in `.env`, no compose file edits
@@ -446,8 +447,9 @@ flowchart TB
 | Module | Project Name | Compose File | Docker Desktop Group |
 |--------|-------------|-------------|---------------------|
 | `postgres` | `market-trend-db` | `docker-compose.postgres.yml` | 📁 market-trend-db |
+| `postgres-sd` | `skill-demand-db` | `docker-compose.postgres-sd.yml` | 📁 skill-demand-db |
 | `airflow` | `giljobi-airflow` | `docker-compose.airflow.yml` | 📁 giljobi-airflow |
-| `spark` | `giljobi-spark` | `docker-compose.spark.yml` | 📁 giljobi-spark |
+| `spark-sd` | `giljobi-spark-sd` | `docker-compose.spark-sd.yml` | 📁 giljobi-spark-sd |
 
 #### down.sh — Stop Modules
 
@@ -467,4 +469,4 @@ Each stream has its own SPEC with pipeline architecture, DAG flow, and data deta
 | Stream | SPEC | Status |
 |--------|------|--------|
 | Market Trend | [pipelines/market-trend/SPEC.md](../pipelines/market-trend/SPEC.md) | Completed |
-| Matching Insights | (TBD) | Under Construction |
+| Skill Demand | [pipelines/skill-demand/SPEC.md](../pipelines/skill-demand/SPEC.md) | E2E verified on sample |
