@@ -1,20 +1,33 @@
 """
-step5_load.py — Load enriched data into PostgreSQL.
+step4_load.py — Load enriched data into PostgreSQL.
 
 Inserts into:
-- jd_postings: one row per job posting
-- jd_skills: one row per skill per posting (exploded from skills[])
+- jd_postings: one row per job posting (job_id as PK)
+- jd_skills: one row per skill per posting (with category)
 
-Tables are created by main.py ensure_schema() before this step runs.
+Tables created by schema.sql before this step runs.
 """
 
 import pandas as pd
+
+
+def _is_null(value) -> bool:
+    """Check if value is null — handles pd.NaN, None, and string 'NaN'."""
+    if value is None:
+        return True
+    if isinstance(value, str) and value in ("NaN", "nan", "None", ""):
+        return True
+    try:
+        return pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+
 
 # =============================================================================
 # Config
 # =============================================================================
 POSTINGS_COLUMNS = [
-    "company", "raw_title", "noc_id", "noc_match_score",
+    "job_id", "company", "raw_title", "noc_id", "noc_match_score",
     "noc_match_method", "seniority", "description",
 ]
 
@@ -34,12 +47,13 @@ def prepare_postings_rows(df: pd.DataFrame) -> list[dict]:
     rows = []
     for _, row in df.iterrows():
         rows.append({
+            "job_id": int(row["job_id"]),
             "company": row.get("company_name"),
-            "raw_title": row.get("raw_title"),
-            "noc_id": None if pd.isna(row.get("noc_id")) else int(row["noc_id"]),
-            "noc_match_score": None if pd.isna(row.get("noc_match_score")) else float(row["noc_match_score"]),
-            "noc_match_method": row.get("noc_match_method"),
-            "seniority": row.get("seniority"),
+            "raw_title": row.get("title"),
+            "noc_id": None if _is_null(row.get("noc_id")) else int(row["noc_id"]),
+            "noc_match_score": None if _is_null(row.get("noc_match_score")) else float(row["noc_match_score"]),
+            "noc_match_method": None if _is_null(row.get("noc_match_method")) else row["noc_match_method"],
+            "seniority": None if _is_null(row.get("seniority")) else row["seniority"],
             "description": row.get("description"),
         })
     return rows
@@ -49,18 +63,28 @@ def prepare_skills_rows(data: list[dict]) -> list[dict]:
     """Explode skills arrays into individual rows for jd_skills insert.
 
     Args:
-        data: List of dicts with job_id and skills (list of strings).
+        data: List of dicts with job_id and skills (list of {name, category} dicts).
 
     Returns:
-        List of dicts with job_id and skill (single string each).
+        List of dicts with job_id, skill, category.
     """
     rows = []
     for item in data:
-        for skill in item.get("skills", []):
-            rows.append({
-                "job_id": item["job_id"],
-                "skill": skill,
-            })
+        skills = item.get("skills", [])
+        if hasattr(skills, '__iter__'):
+            for skill in skills:
+                if isinstance(skill, dict):
+                    rows.append({
+                        "job_id": item["job_id"],
+                        "skill": skill.get("name", ""),
+                        "category": skill.get("category", ""),
+                    })
+                elif isinstance(skill, str):
+                    rows.append({
+                        "job_id": item["job_id"],
+                        "skill": skill,
+                        "category": "",
+                    })
     return rows
 
 
@@ -85,9 +109,9 @@ def load_postings(rows: list[dict], conn) -> int:
     for row in rows:
         cur.execute(
             """INSERT INTO jd_postings
-               (company, raw_title, noc_id, noc_match_score,
+               (job_id, company, raw_title, noc_id, noc_match_score,
                 noc_match_method, seniority, description)
-               VALUES (%(company)s, %(raw_title)s, %(noc_id)s,
+               VALUES (%(job_id)s, %(company)s, %(raw_title)s, %(noc_id)s,
                        %(noc_match_score)s, %(noc_match_method)s,
                        %(seniority)s, %(description)s)
                ON CONFLICT DO NOTHING""",
@@ -116,8 +140,8 @@ def load_skills(skills_rows: list[dict], conn) -> int:
     count = 0
     for row in skills_rows:
         cur.execute(
-            """INSERT INTO jd_skills (jd_id, skill)
-               VALUES (%(job_id)s, %(skill)s)
+            """INSERT INTO jd_skills (jd_id, skill, category)
+               VALUES (%(job_id)s, %(skill)s, %(category)s)
                ON CONFLICT DO NOTHING""",
             row,
         )

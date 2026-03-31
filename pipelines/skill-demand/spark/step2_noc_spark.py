@@ -29,6 +29,8 @@ parser.add_argument("--output", type=str,
                     default="/opt/spark/data/processed/skill-demand/step2")
 parser.add_argument("--db-conn", type=str,
                     default="postgresql://postgres:postgres@skill-demand-db:5432/giljobi_sd")
+parser.add_argument("--partitions", type=int, default=16,
+                    help="Number of partitions (= checkpoint granularity)")
 args = parser.parse_args()
 
 # =============================================================================
@@ -50,6 +52,7 @@ spark.sparkContext.setLogLevel("WARN")
 # Load Data
 # =============================================================================
 import os
+import json
 import numpy as np
 import pandas as pd
 
@@ -57,9 +60,9 @@ print(f"[STEP 2] Loading input: {args.input}")
 df = spark.read.parquet(args.input)
 total_rows = df.count()
 # Repartition to match worker count for parallel processing
-num_partitions = int(spark.conf.get("spark.executor.instances", "8"))
+num_partitions = args.partitions
 df = df.repartition(num_partitions)
-print(f"[STEP 2] {total_rows} rows loaded, {num_partitions} partitions.")
+print(f"[STEP 2] {total_rows} rows loaded, {num_partitions} partitions (~{total_rows // num_partitions} rows/partition).")
 
 # Load NOC titles from DB
 print(f"[STEP 2] Loading NOC titles from DB...")
@@ -98,27 +101,73 @@ unmatched_count = spark.sparkContext.accumulator(0)
 # mapPartitions — encode job titles + cosine similarity
 # =============================================================================
 PROGRESS_DIR = os.path.join(args.output, "progress")
-# Clean previous progress files
+CHECKPOINT_DIR = os.path.join(args.output, "checkpoints")
 import shutil
+
+# Keep checkpoints for resume, only reset progress
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 if os.path.exists(PROGRESS_DIR):
     shutil.rmtree(PROGRESS_DIR)
 os.makedirs(PROGRESS_DIR, exist_ok=True)
 
+# Validate existing checkpoints
+valid_cps = []
+corrupted_cps = []
+for f in sorted(os.listdir(CHECKPOINT_DIR)):
+    if not f.endswith(".json"):
+        continue
+    fpath = os.path.join(CHECKPOINT_DIR, f)
+    try:
+        with open(fpath) as fp:
+            json.load(fp)
+        valid_cps.append(f)
+    except (json.JSONDecodeError, ValueError):
+        corrupted_cps.append(f)
+        os.remove(fpath)
+
+expected_partitions = set(f"p{i}.json" for i in range(num_partitions))
+existing_set = set(valid_cps)
+missing_cps = sorted(expected_partitions - existing_set)
+
+if valid_cps or corrupted_cps:
+    print(f"[STEP 2] Resuming — {len(valid_cps)} valid, {len(corrupted_cps)} corrupted (deleted), {len(missing_cps)} to reprocess")
+    if corrupted_cps:
+        print(f"[STEP 2]   Corrupted: {corrupted_cps}")
+    if missing_cps:
+        print(f"[STEP 2]   Missing: {missing_cps}")
+
 ENCODE_CHUNK_SIZE = 1000  # encode + match in chunks for progress reporting
 
-def match_partition(rows):
-    """Encode job titles and match against broadcasted NOC embeddings."""
+def match_partition(partition_idx, rows):
+    """Encode job titles, match NOC, extract seniority. Checkpoint per partition."""
     from sentence_transformers import SentenceTransformer
     import numpy as np
     import json
+    import sys
     from pathlib import Path
+
+    if "/opt/spark/pipelines/skill-demand" not in sys.path:
+        sys.path.insert(0, "/opt/spark/pipelines/skill-demand")
+    from src.step2_seniority import extract_seniority
 
     rows_list = list(rows)
     if not rows_list:
         return
 
-    partition_id = rows_list[0]["job_id"]
-    progress_file = Path(f"/opt/spark/data/processed/skill-demand/step2/progress/part_{partition_id}.json")
+    pid = f"p{partition_idx}"
+    checkpoint_file = Path(f"/opt/spark/data/processed/skill-demand/step2/checkpoints/{pid}.json")
+    progress_file = Path(f"/opt/spark/data/processed/skill-demand/step2/progress/{pid}.json")
+
+    # Resume: if checkpoint exists, yield cached results
+    if checkpoint_file.exists():
+        try:
+            with open(checkpoint_file) as f:
+                for r in json.load(f):
+                    yield r
+            return
+        except (json.JSONDecodeError, ValueError):
+            checkpoint_file.unlink()  # corrupted → delete and reprocess
+
     progress_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Load model on each worker
@@ -131,6 +180,7 @@ def match_partition(rows):
     unmatched = 0
     processed = 0
     total_in_partition = len(rows_list)
+    results = []
 
     # Process in chunks for progress updates
     for chunk_start in range(0, total_in_partition, ENCODE_CHUNK_SIZE):
@@ -144,37 +194,43 @@ def match_partition(rows):
         for i, row in enumerate(chunk_rows):
             best_idx = int(np.argmax(sim_matrix[i]))
             best_score = float(sim_matrix[i][best_idx])
+            seniority, _ = extract_seniority(row["formatted_experience_level"], row["title"])
+
+            base = {
+                "job_id": row["job_id"],
+                "company_name": row["company_name"],
+                "title": row["title"],
+                "description": row["description"],
+                "formatted_experience_level": row["formatted_experience_level"],
+                "noc_match_score": round(best_score, 4),
+                "seniority": seniority,
+            }
 
             if best_score >= threshold:
                 matched_count.add(1)
                 matched += 1
-                yield {
-                    "job_id": row["job_id"],
-                    "company_name": row["company_name"],
-                    "title": row["title"],
-                    "description": row["description"],
-                    "noc_id": noc_id_list[best_idx],
-                    "noc_match_score": round(best_score, 4),
-                    "noc_match_method": "sentence_transformer",
-                }
+                result = {**base, "noc_id": noc_id_list[best_idx], "noc_match_method": "sentence_transformer"}
             else:
                 unmatched_count.add(1)
                 unmatched += 1
-                yield {
-                    "job_id": row["job_id"],
-                    "company_name": row["company_name"],
-                    "title": row["title"],
-                    "description": row["description"],
-                    "noc_id": None,
-                    "noc_match_score": round(best_score, 4),
-                    "noc_match_method": None,
-                }
+                result = {**base, "noc_id": None, "noc_match_method": None}
+
+            results.append(result)
 
         processed += len(chunk_rows)
-
-        # Update progress file after each chunk
         with open(progress_file, "w") as f:
             json.dump({"rows": processed, "total": total_in_partition, "matched": matched, "unmatched": unmatched}, f)
+
+    # Save partition checkpoint
+    try:
+        checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+    except FileExistsError:
+        pass
+    with open(checkpoint_file, "w") as f:
+        json.dump(results, f, default=str)
+
+    for r in results:
+        yield r
 
 # =============================================================================
 # Execute
@@ -215,7 +271,7 @@ def _progress_monitor():
 monitor = threading.Thread(target=_progress_monitor, daemon=True)
 monitor.start()
 
-result_rdd = df.rdd.mapPartitions(match_partition)
+result_rdd = df.rdd.mapPartitionsWithIndex(match_partition)
 result_df = spark.createDataFrame(result_rdd)
 
 # Write output
@@ -229,12 +285,23 @@ elapsed = datetime.datetime.now() - start
 # =============================================================================
 # Summary
 # =============================================================================
+result_pd = pd.read_parquet(output_path)
+total_out = len(result_pd)
+matched_out = int(result_pd["noc_id"].notna().sum())
+unmatched_out = total_out - matched_out
+seniority_counts = result_pd["seniority"].value_counts(dropna=False)
+seniority_filled = int(result_pd["seniority"].notna().sum())
+
 print(f"\n[STEP 2] === Summary ===")
-print(f"  Total:      {total_rows}")
-print(f"  Matched:    {matched_count.value}")
-print(f"  Unmatched:  {unmatched_count.value}")
-print(f"  Match rate: {matched_count.value / total_rows * 100:.1f}%")
+print(f"  Total:      {total_out}")
+print(f"  Matched:    {matched_out}")
+print(f"  Unmatched:  {unmatched_out}")
+print(f"  Match rate: {matched_out / total_out * 100:.1f}%")
 print(f"  Threshold:  {threshold}")
+print(f"  Seniority:  {seniority_filled}/{total_out} ({seniority_filled/total_out*100:.1f}%)")
+for tier, count in seniority_counts.items():
+    label = tier if tier is not None and str(tier) != "nan" else "null (needs LLM)"
+    print(f"    {label}: {count}")
 print(f"  Elapsed:    {elapsed}")
 print(f"  Output:     {output_path}")
 

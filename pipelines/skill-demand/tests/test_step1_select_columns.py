@@ -67,6 +67,13 @@ class TestSelectColumns:
             assert "location" not in result.columns
             assert "skills_desc" not in result.columns
 
+    def test_formatted_experience_level_is_kept(self):
+        """formatted_experience_level is required for seniority extraction."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = self._make_csv(tmpdir)
+            result = select_columns(csv_path)
+            assert "formatted_experience_level" in result.columns
+
 
 # ============================================================
 # Null Handling
@@ -82,6 +89,7 @@ class TestNullHandling:
                 "company_name": ["A", "B", "C"],
                 "title": ["SWE", None, "PM"],
                 "description": ["desc1", "desc2", "desc3"],
+                "formatted_experience_level": ["Entry level", "Mid-Senior level", None],
             })
             path = os.path.join(tmpdir, "postings.csv")
             df.to_csv(path, index=False)
@@ -95,6 +103,7 @@ class TestNullHandling:
                 "company_name": ["A", "B", "C"],
                 "title": ["SWE", "DS", "PM"],
                 "description": ["desc1", None, "desc3"],
+                "formatted_experience_level": ["Entry level", "Mid-Senior level", None],
             })
             path = os.path.join(tmpdir, "postings.csv")
             df.to_csv(path, index=False)
@@ -109,11 +118,27 @@ class TestNullHandling:
                 "company_name": [None, "B"],
                 "title": ["SWE", "DS"],
                 "description": ["desc1", "desc2"],
+                "formatted_experience_level": ["Entry level", None],
             })
             path = os.path.join(tmpdir, "postings.csv")
             df.to_csv(path, index=False)
             result = select_columns(path)
             assert len(result) == 2
+
+    def test_keeps_rows_with_null_experience_level(self):
+        """formatted_experience_level can be null (23.7%) — don't drop those rows."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            df = pd.DataFrame({
+                "job_id": [1, 2, 3],
+                "company_name": ["A", "B", "C"],
+                "title": ["SWE", "DS", "PM"],
+                "description": ["desc1", "desc2", "desc3"],
+                "formatted_experience_level": ["Entry level", None, "Senior"],
+            })
+            path = os.path.join(tmpdir, "postings.csv")
+            df.to_csv(path, index=False)
+            result = select_columns(path)
+            assert len(result) == 3
 
 
 # ============================================================
@@ -130,6 +155,7 @@ class TestEdgeCases:
                 "company_name": [],
                 "title": [],
                 "description": [],
+                "formatted_experience_level": [],
             })
             path = os.path.join(tmpdir, "postings.csv")
             df.to_csv(path, index=False)
@@ -163,6 +189,7 @@ class TestRun:
             "company_name": ["Google", "Meta", "Amazon"],
             "title": ["SWE", "Data Scientist", "DevOps"],
             "description": ["Build stuff", "Analyze data", "Deploy infra"],
+            "formatted_experience_level": ["Entry level", None, "Senior"],
             "max_salary": [100000, 120000, 110000],
         })
         path = os.path.join(tmpdir, "postings.csv")

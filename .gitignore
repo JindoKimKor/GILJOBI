@@ -10,17 +10,15 @@ __pycache__/
 data/raw/
 data/processed/
 
+# Archived pipelines (matching-insights, old skill-demand code)
+_archive/
+
 # Airflow logs (generated at runtime)
 infra/logs/
 
 # Active environment config (symlink to config/.env.{environment})
 infra/.env
 
-# LLM normalization test — data files (CSV outputs, checkpoints) are too large for GitHub
-# Code files (.py, .ipynb) are tracked; data is not.
-data/processed/llm_title_accuracy_test/**/*.csv
-data/processed/llm_title_accuracy_test/**/*.json
-data/processed/llm_title_accuracy_test/**/*.txt
 
 # C extensions
 *.so

@@ -60,21 +60,23 @@ with DAG(
     tags=["skill-demand", "etl", "llm", "spark"],
     default_args=default_args,
     params={
-        # LLM rate limiting
-        "batch_size": Param(10, type="integer", description="JDs per LLM call"),
+        # LLM rate limiting (Step 3)
         "batch_delay_sec": Param(5, type="integer", description="Seconds between LLM batches"),
         "max_batches_per_session": Param(50, type="integer", description="Max batches per session window"),
         "session_cooldown_min": Param(300, type="integer", description="Minutes to wait for session reset after hitting limit"),
-        # Input (default: full dataset, change for testing)
-        "step1_input": Param("step1_extracted_sample.parquet", type="string", description="Step 1 output filename (use step1_extracted_sample.parquet for testing)"),
-        # NOC matching
-        "noc_threshold": Param(0.65, type="number", description="Sentence Transformers cosine similarity threshold"),
-        # Spark resources — Step 2 (Sentence Transformers, memory-heavy)
+        # Step 2 — input file (sample for testing, step1_extracted.parquet for full)
+        "step2_input_file": Param("step1_extracted_sample.parquet", type="string", description="[Test only] Parquet filename in processed/step1/ — use sample for testing, step1_extracted.parquet for production"),
+        # Step 2 — NOC matching
+        "step2_noc_similarity_threshold": Param(0.65, type="number", description="Minimum cosine similarity score to accept a NOC match (0.0-1.0)"),
+        # Spark resources — Step 2 (Sentence Transformers, memory-heavy, fewer workers)
+        "step2_workers": Param(4, type="integer", description="Spark worker count for Step 2"),
         "step2_executor_memory": Param("2g", type="string", description="Step 2 executor memory (model loading)"),
         "step2_executor_instances": Param(4, type="integer", description="Step 2 executor count"),
-        # Spark resources — Step 3+4 (LLM calls, IO-heavy)
-        "step3_4_executor_memory": Param("512m", type="string", description="Step 3+4 executor memory"),
-        "step3_4_executor_instances": Param(4, type="integer", description="Step 3+4 executor count"),
+        "step2_partitions": Param(16, type="integer", description="Step 2 partition count (= checkpoint granularity, ~8K rows each at 124K)"),
+        # Spark resources — Step 3 (LLM calls, IO-heavy, more workers)
+        "step3_workers": Param(8, type="integer", description="Spark worker count for Step 3"),
+        "step3_executor_memory": Param("512m", type="string", description="Step 3 executor memory"),
+        "step3_executor_instances": Param(8, type="integer", description="Step 3 executor count"),
     },
     doc_md="""
     ## Skill Demand Pipeline
@@ -132,16 +134,36 @@ with DAG(
         start_spark_cluster = EmptyOperator(task_id="start_spark_cluster")
 
     # =========================================================================
-    # Infrastructure — Spark Workers (on-demand, before Spark jobs)
+    # Infrastructure — Spark Workers (scaled per step)
     # =========================================================================
 
     if MANAGE_SPARK:
-        start_spark_workers = BashOperator(
-            task_id="start_spark_workers",
-            bash_command=f"cd {INFRA_DIR} && bash up.sh spark-sd-workers 2>&1",
-        )
+        @task(task_id="scale_workers_step2")
+        def scale_workers_step2(**context):
+            """Scale Spark workers for Step 2 (memory-heavy, fewer workers)."""
+            import subprocess
+            n = context["params"]["step2_workers"]
+            cmd = f"cd {INFRA_DIR} && SPARK_SD_WORKER_REPLICAS={n} bash up.sh spark-sd-workers 2>&1"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            print(result.stdout)
+            if result.returncode != 0:
+                print(result.stderr)
+            print(f"[INFRA] Scaled to {n} workers for Step 2")
+
+        @task(task_id="scale_workers_step3")
+        def scale_workers_step3(**context):
+            """Scale Spark workers for Step 3 (IO-heavy, more workers)."""
+            import subprocess
+            n = context["params"]["step3_workers"]
+            cmd = f"cd {INFRA_DIR} && SPARK_SD_WORKER_REPLICAS={n} bash up.sh spark-sd-workers 2>&1"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            print(result.stdout)
+            if result.returncode != 0:
+                print(result.stderr)
+            print(f"[INFRA] Scaled to {n} workers for Step 3")
     else:
-        start_spark_workers = EmptyOperator(task_id="start_spark_workers")
+        scale_workers_step2 = EmptyOperator(task_id="scale_workers_step2")
+        scale_workers_step3 = EmptyOperator(task_id="scale_workers_step3")
 
     # =========================================================================
     # NOC Setup — Populate noc_titles in skill-demand DB
@@ -283,8 +305,9 @@ with DAG(
         batch_id = hook.post_batch(
             file="/opt/spark/pipelines/skill-demand/spark/step2_noc_spark.py",
             args=[
-                "--threshold", str(params["noc_threshold"]),
-                "--input", f"/opt/spark/data/processed/skill-demand/step1/{params['step1_input']}",
+                "--threshold", str(params["step2_noc_similarity_threshold"]),
+                "--input", f"/opt/spark/data/processed/skill-demand/step1/{params['step2_input_file']}",
+                "--partitions", str(params["step2_partitions"]),
             ],
             conf={
                 "spark.executor.memory": params["step2_executor_memory"],
@@ -323,14 +346,14 @@ with DAG(
                 total_done = 0
                 total_matched = 0
                 total_unmatched = 0
-                for pf in Path(progress_dir).glob("part_*.json"):
+                for pf in Path(progress_dir).glob("p*.json"):
                     with open(pf) as f:
                         data = json.load(f)
                         total_done += data.get("rows", 0)
                         total_matched += data.get("matched", 0)
                         total_unmatched += data.get("unmatched", 0)
                 if total_done > 0:
-                    msg = f"[STEP 2] Progress: {total_done}/123782 ({total_done/123782*100:.1f}%) — matched: {total_matched}, unmatched: {total_unmatched}"
+                    msg = f"[STEP 2] Progress: {total_done} rows — matched: {total_matched}, unmatched: {total_unmatched}"
                     if msg != last_progress:
                         print(msg)
                         last_progress = msg
@@ -351,7 +374,7 @@ with DAG(
 
     @task(task_id="validate_noc_match_rate")
     def validate_v3():
-        """Validate NOC normalization: match rate, split stats."""
+        """Validate NOC normalization: match rate, split stats, seniority."""
         import pandas as pd
         from src.validators.v3_normalize import validate_normalize
 
@@ -361,15 +384,25 @@ with DAG(
         print(f"[V3] Match rate: {stats['match_rate']:.1%}")
         print(f"[V3] Matched: {stats['matched']}, Unmatched: {stats['unmatched']}")
         print(f"[V3] Avg score: {stats['avg_score']:.3f}")
+
+        # Seniority stats
+        if "seniority" in df.columns:
+            seniority_filled = int(df["seniority"].notna().sum())
+            total = len(df)
+            print(f"[V3] Seniority: {seniority_filled}/{total} ({seniority_filled/total*100:.1f}%)")
+            for tier, count in df["seniority"].value_counts(dropna=False).items():
+                label = tier if pd.notna(tier) else "null (needs LLM)"
+                print(f"[V3]   {label}: {count}")
+
         return stats
 
     # =========================================================================
-    # Step 3 — LLM Title Normalization (company-grouped) + ST re-match
+    # Step 3 — LLM Enrich: NOC + Seniority + Skills
     # =========================================================================
 
-    @task(task_id="step3_title_normalize_llm")
-    def step3_title_normalize(**context):
-        """Step 3: LLM title normalize by company + ST NOC re-match (Spark/Livy)."""
+    @task(task_id="step3_enrich")
+    def step3_enrich(**context):
+        """Step 3: LLM enrich — NOC + seniority + skills (Spark/Livy)."""
         import time
         from airflow.providers.apache.livy.hooks.livy import LivyHook
 
@@ -377,13 +410,15 @@ with DAG(
         hook = LivyHook(livy_conn_id="livy_sd")
 
         batch_id = hook.post_batch(
-            file="/opt/spark/pipelines/skill-demand/spark/step3_title_normalize_llm_spark.py",
+            file="/opt/spark/pipelines/skill-demand/spark/step3_enrich_spark.py",
             args=[
                 "--batch-delay", str(params["batch_delay_sec"]),
+                "--max-batches-per-session", str(params["max_batches_per_session"]),
+                "--session-cooldown-min", str(params["session_cooldown_min"]),
             ],
             conf={
-                "spark.executor.memory": params["step3_4_executor_memory"],
-                "spark.executor.instances": str(params["step3_4_executor_instances"]),
+                "spark.executor.memory": params["step3_executor_memory"],
+                "spark.executor.instances": str(params["step3_executor_instances"]),
                 "spark.driver.memory": "2g",
             },
         )
@@ -415,15 +450,26 @@ with DAG(
             try:
                 import json as _json
                 from pathlib import Path
-                total_rows = 0
-                total_matched = 0
+                unmatched_rows = 0
+                unmatched_noc = 0
+                matched_rows = 0
+                matched_skills = 0
                 for pf in Path(progress_dir).glob("*.json"):
                     with open(pf) as f:
                         data = _json.load(f)
-                        total_rows += data.get("rows", 0)
-                        total_matched += data.get("matched", 0)
-                if total_rows > 0:
-                    msg = f"[STEP 3] Progress: {total_rows} rows processed, {total_matched} NOC matched"
+                        if data.get("type") == "unmatched":
+                            unmatched_rows += data.get("rows", 0)
+                            unmatched_noc += data.get("matched", 0)
+                        elif data.get("type") == "matched":
+                            matched_rows += data.get("rows", 0)
+                            matched_skills += data.get("with_skills", 0)
+                total = unmatched_rows + matched_rows
+                if total > 0:
+                    msg = (
+                        f"[STEP 3] Progress: {total} rows — "
+                        f"unmatched: {unmatched_rows} ({unmatched_noc} NOC matched), "
+                        f"matched: {matched_rows} ({matched_skills} with skills)"
+                    )
                     if msg != last_progress:
                         print(msg)
                         last_progress = msg
@@ -439,38 +485,22 @@ with DAG(
             raise Exception(f"Step 3 failed with state: {state}")
 
     # =========================================================================
-    # V4 — Post-Fallback Validation
+    # V4 — Post-Enrich Validation (NOC + Seniority + Skills)
     # =========================================================================
 
-    @task(task_id="validate_noc_completion")
+    @task(task_id="validate_enrich")
     def validate_v4():
-        """Validate NOC completion rate after LLM fallback."""
+        """Validate Step 3 output: NOC completion, seniority, skills."""
         import pandas as pd
-        from src.validators.v4_fallback import validate_fallback
+        from src.validators.v4_enrich import validate_enrich
 
-        df = pd.read_parquet(f"{PROCESSED_DIR}/step3/step3_normalized.parquet")
-        stats = validate_fallback(df)
-
-        print(f"[V4] Completion rate: {stats['completion_rate']:.1%}")
-        print(f"[V4] By method: {stats['by_method']}")
-        return stats
-
-    # =========================================================================
-    # V5 — Post-Enrich Validation
-    # =========================================================================
-
-    @task(task_id="validate_seniority_and_skills")
-    def validate_v5():
-        """Validate seniority + skills extraction."""
-        import pandas as pd
-        from src.validators.v5_enrich import validate_enrich
-
-        df = pd.read_parquet(f"{PROCESSED_DIR}/step3_4/step3_4_enriched.parquet")
+        df = pd.read_parquet(f"{PROCESSED_DIR}/step3/step3_enriched.parquet")
         stats = validate_enrich(df)
 
-        print(f"[V5] Valid seniority: {stats['valid_seniority']}/{stats['total']}")
-        print(f"[V5] With skills: {stats['with_skills']}/{stats['total']}")
-        print(f"[V5] Avg skills/posting: {stats['avg_skills_per_posting']:.1f}")
+        print(f"[V4] NOC: {stats['noc_mapped']}/{stats['total']} ({stats['noc_completion_rate']:.1%})")
+        print(f"[V4] NOC by method: {stats['noc_by_method']}")
+        print(f"[V4] Seniority: {stats['valid_seniority']}/{stats['total']} valid, {stats['null_seniority']} null")
+        print(f"[V4] Skills: {stats['with_skills']}/{stats['total']}, avg {stats['avg_skills_per_posting']:.1f}/posting")
         return stats
 
     # =========================================================================
@@ -478,13 +508,17 @@ with DAG(
     # =========================================================================
 
     @task
-    def step5_load():
+    def step4_load():
         """Load enriched data into skill-demand PostgreSQL."""
         import pandas as pd
         import psycopg2
-        from src.step5_load import prepare_postings_rows, prepare_skills_rows, load_postings, load_skills
+        from src.step4_load import prepare_postings_rows, prepare_skills_rows, load_postings, load_skills
 
-        df = pd.read_parquet(f"{PROCESSED_DIR}/step3_4/step3_4_enriched.parquet")
+        # Load input
+        input_path = f"{PROCESSED_DIR}/step3/step3_enriched.parquet"
+        df = pd.read_parquet(input_path)
+        print(f"[STEP 4] Input: {input_path}")
+        print(f"[STEP 4] {len(df)} rows, {int(df['noc_id'].notna().sum())} with NOC, {int(df['seniority'].notna().sum())} with seniority")
 
         conn = psycopg2.connect(SD_DB_CONN)
         conn.autocommit = True
@@ -492,17 +526,39 @@ with DAG(
         try:
             # Create tables if not exist
             cur = conn.cursor()
+            print(f"[STEP 4] Creating schema from {PIPELINE_DIR}/schema.sql...")
             cur.execute(open(f"{PIPELINE_DIR}/schema.sql").read())
             cur.close()
+            print(f"[STEP 4] Schema ready.")
 
+            # Insert postings
             posting_rows = prepare_postings_rows(df)
             count_postings = load_postings(posting_rows, conn)
-            print(f"[STEP 5] {count_postings} postings inserted.")
+            print(f"[STEP 4] {count_postings} postings inserted.")
 
+            # Insert skills
             skill_data = df[["job_id", "skills"]].to_dict("records")
             skill_rows = prepare_skills_rows(skill_data)
             count_skills = load_skills(skill_rows, conn)
-            print(f"[STEP 5] {count_skills} skills inserted.")
+            print(f"[STEP 4] {count_skills} skills inserted.")
+
+            # Verify
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM jd_postings")
+            db_postings = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM jd_skills")
+            db_skills = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(DISTINCT skill) FROM jd_skills")
+            unique_skills = cur.fetchone()[0]
+            cur.execute("SELECT category, COUNT(*) FROM jd_skills GROUP BY category ORDER BY COUNT(*) DESC")
+            cat_counts = cur.fetchall()
+            cur.close()
+
+            print(f"[STEP 4] === DB Verification ===")
+            print(f"  jd_postings: {db_postings} rows")
+            print(f"  jd_skills: {db_skills} rows ({unique_skills} unique skills)")
+            for cat, cnt in cat_counts:
+                print(f"    {cat}: {cnt}")
         finally:
             conn.close()
 
@@ -538,9 +594,10 @@ with DAG(
     #
     #   ensure_db → noc_setup → download → v1 → step1 → v2  (no Spark needed)
     #   → start_spark_cluster (Master + Livy)
-    #   → start_spark_workers
-    #   → step2_noc_match_st → v3                          (ST NOC matching)
-    #   → step3_title_normalize_llm → v4                   (LLM normalize + ST re-match)
+    #   → scale_workers_step2 (4 workers)
+    #   → step2_noc_match_st → v3                          (ST NOC + seniority)
+    #   → scale_workers_step3 (8 workers)
+    #   → step3_enrich → v4                                (LLM NOC + seniority + skills)
     #   → stop_spark_workers                                (free worker resources)
     #   → step5_load                                        (DB only, no Spark)
     #   → stop_spark_cluster                                (cleanup)
@@ -551,20 +608,21 @@ with DAG(
     v1 = validate_v1(dl)
     s1 = step1_extract(v1)
     v2 = validate_v2(s1)
+    sw2 = scale_workers_step2()
     s2 = step2_noc()
     v3 = validate_v3()
-    s3 = step3_title_normalize()
+    sw3 = scale_workers_step3()
+    s3 = step3_enrich()
     v4 = validate_v4()
-    s5 = step5_load()
+    s4_load = step4_load()
 
     (
         ensure_db
         >> noc >> dl >> v1 >> s1 >> v2
         >> start_spark_cluster
-        >> start_spark_workers
-        >> s2 >> v3
-        >> s3 >> v4
+        >> sw2 >> s2 >> v3
+        >> sw3 >> s3 >> v4
         >> stop_spark_workers
-        >> s5
+        >> s4_load
         >> stop_spark_cluster
     )

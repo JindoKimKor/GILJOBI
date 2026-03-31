@@ -1,8 +1,8 @@
 """
 step1_select_columns.py — Extract required columns from raw LinkedIn CSV.
 
-Selects job_id, company_name, title, description from postings.csv.
-Drops rows with null title or description.
+Selects job_id, company_name, title, description, formatted_experience_level
+from postings.csv. Drops rows with null title or description.
 Saves output as parquet to processed/step1/.
 """
 
@@ -14,7 +14,7 @@ import pandas as pd
 # =============================================================================
 # Config
 # =============================================================================
-REQUIRED_COLUMNS = ["job_id", "company_name", "title", "description"]
+REQUIRED_COLUMNS = ["job_id", "company_name", "title", "description", "formatted_experience_level"]
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "processed" / "skill-demand" / "step1"
 
 # =============================================================================
