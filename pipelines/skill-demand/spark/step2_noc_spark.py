@@ -218,16 +218,25 @@ def match_partition(partition_idx, rows):
             results.append(result)
 
         processed += len(chunk_rows)
-        with open(progress_file, "w") as f:
-            json.dump({"rows": processed, "total": total_in_partition, "matched": matched, "unmatched": unmatched}, f)
+        try:
+            with open(progress_file, "w") as f:
+                json.dump({"rows": processed, "total": total_in_partition, "matched": matched, "unmatched": unmatched}, f)
+        except OSError:
+            pass  # progress is non-critical, don't crash partition
 
-    # Save partition checkpoint
-    try:
-        checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-    except FileExistsError:
-        pass
-    with open(checkpoint_file, "w") as f:
-        json.dump(results, f, default=str)
+    # Save partition checkpoint (critical — retry on Docker volume I/O error)
+    import time as _time
+    for _attempt in range(3):
+        try:
+            checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(checkpoint_file, "w") as f:
+                json.dump(results, f, default=str)
+            break
+        except OSError:
+            if _attempt < 2:
+                _time.sleep(1)
+            else:
+                raise
 
     for r in results:
         yield r
