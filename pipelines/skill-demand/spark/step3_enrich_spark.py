@@ -215,12 +215,17 @@ def process_unmatched(partition_idx, rows):
 
     def save_checkpoint(name, results):
         cp = Path(f"{CHECKPOINT_BASE}/unmatched_{name}.json")
-        try:
-            cp.parent.mkdir(parents=True, exist_ok=True)
-        except FileExistsError:
-            pass
-        with open(cp, "w") as f:
-            json.dump(results, f, default=str)
+        for _attempt in range(3):
+            try:
+                cp.parent.mkdir(parents=True, exist_ok=True)
+                with open(cp, "w") as f:
+                    json.dump(results, f, default=str)
+                break
+            except OSError:
+                if _attempt < 2:
+                    time.sleep(1)
+                else:
+                    raise
 
     def check_checkpoint(name):
         cp = Path(f"{CHECKPOINT_BASE}/unmatched_{name}.json")
@@ -236,10 +241,10 @@ def process_unmatched(partition_idx, rows):
         pf = Path(f"{PROGRESS_BASE}/unmatched_{name}.json")
         try:
             pf.parent.mkdir(parents=True, exist_ok=True)
-        except FileExistsError:
-            pass
-        with open(pf, "w") as f:
-            json.dump({"name": name, "rows": rows_count, "matched": matched_count, "type": "unmatched"}, f)
+            with open(pf, "w") as f:
+                json.dump({"name": name, "rows": rows_count, "matched": matched_count, "type": "unmatched"}, f)
+        except OSError:
+            pass  # progress is non-critical
 
     def process_batch(batch_rows, batch_name):
         """Process a batch of rows with the unmatched prompt."""
@@ -344,12 +349,17 @@ def process_matched(partition_idx, rows):
 
     def save_checkpoint(name, results):
         cp = Path(f"{CHECKPOINT_BASE}/matched_{name}.json")
-        try:
-            cp.parent.mkdir(parents=True, exist_ok=True)
-        except FileExistsError:
-            pass
-        with open(cp, "w") as f:
-            json.dump(results, f, default=str)
+        for _attempt in range(3):
+            try:
+                cp.parent.mkdir(parents=True, exist_ok=True)
+                with open(cp, "w") as f:
+                    json.dump(results, f, default=str)
+                break
+            except OSError:
+                if _attempt < 2:
+                    time.sleep(1)
+                else:
+                    raise
 
     def check_checkpoint(name):
         cp = Path(f"{CHECKPOINT_BASE}/matched_{name}.json")
@@ -365,10 +375,10 @@ def process_matched(partition_idx, rows):
         pf = Path(f"{PROGRESS_BASE}/matched_{name}.json")
         try:
             pf.parent.mkdir(parents=True, exist_ok=True)
-        except FileExistsError:
-            pass
-        with open(pf, "w") as f:
-            json.dump({"name": name, "rows": rows_count, "with_skills": skills_count, "type": "matched"}, f)
+            with open(pf, "w") as f:
+                json.dump({"name": name, "rows": rows_count, "with_skills": skills_count, "type": "matched"}, f)
+        except OSError:
+            pass  # progress is non-critical
 
     def process_batch(batch_rows, batch_name):
         """Process a batch of rows with the matched prompt."""
