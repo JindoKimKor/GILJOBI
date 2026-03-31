@@ -10,7 +10,7 @@
 # Notes:
 #   - Separate DB from market-trend (port 5434)
 #   - noc_titles populated independently by the pipeline
-#   - Schema created by main.py ensure_schema() or DAG step5_load
+#   - Schema created by schema.sql via DAG step4_load
 # =============================================================================
 
 services:

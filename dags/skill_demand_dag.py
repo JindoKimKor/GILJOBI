@@ -3,17 +3,18 @@ Skill Demand Pipeline — Airflow DAG.
 
 Orchestrates the full pipeline lifecycle including infrastructure:
     [ENSURE_DB] → [ENSURE_SPARK] → DOWNLOAD → V1 → STEP1 → V2
-    → STEP2 (Sentence Transformers via LivyOperator)
-    → V3 → STEP3+4 (LLM batch pipeline via LivyOperator)
-    → V4 → V5 → STEP5 → [STOP_SPARK]
+    → STEP2 (ST NOC + seniority via Spark/Livy)
+    → V3 → STEP3 (LLM enrich: NOC + seniority + skills via Spark/Livy)
+    → V4 → STEP4 (DB load) → [STOP_SPARK]
 
 Infrastructure management:
     MANAGE_PIPELINE_DB=true  → Starts PostgreSQL container (skill-demand DB)
-    MANAGE_SPARK=true        → Starts/stops Spark+Livy cluster
+    MANAGE_SPARK=true        → Starts/stops Spark+Livy cluster, scales workers per step
 
-LLM steps (3+4) are combined into a single batch processor:
-    Each batch: NOC fallback → seniority + skills extraction → checkpoint
-    Rate limited for Claude CLI subscription session limits.
+Step 3 processes ALL rows with 2 prompt types:
+    Unmatched: NOC list + JD → NOC + seniority + skills (5/call)
+    Matched: JD only → seniority + skills (10/call)
+    Similarity-based adaptive batch, checkpoint resume, corrupted detection.
 
 Schedule: Manual trigger only (run after new dataset is downloaded)
 """
@@ -87,19 +88,17 @@ with DAG(
 
     **Steps:**
     1. Download dataset from Kaggle API
-    2. Extract columns (job_id, company_name, title, description)
-    3. NOC normalize via Sentence Transformers (cosine similarity)
-    4. LLM fallback for sub-threshold NOC matches + seniority + skills extraction
-    5. Load into skill-demand PostgreSQL (jd_postings + jd_skills)
+    2. Extract columns + ST NOC matching + seniority (CSV + keyword)
+    3. LLM Enrich: NOC (unmatched) + seniority (missing) + skills (4 categories)
+    4. Load into skill-demand PostgreSQL (jd_postings + jd_skills with category)
 
-    **Spark Features:** Broadcast Join, UDF, mapPartitions, Schema Enforcement
-    **LLM:** Claude Haiku CLI (subscription, rate limited, checkpoint-based resume)
+    **Spark Features:** Broadcast Join, mapPartitionsWithIndex, checkpoint resume
+    **LLM:** Claude Haiku CLI (subscription, similarity-based adaptive batch)
+    **Skills:** hard_skill, soft_skill, tool, certification
 
     **Parameters (adjustable at trigger time):**
-    - `batch_size`: JDs per LLM call (default: 10)
-    - `batch_delay_sec`: Seconds between batches (default: 5)
-    - `max_batches_per_run`: Stop after N batches, resume next run (default: 50)
-    - `noc_threshold`: Cosine similarity threshold for Step 2 (default: 0.75)
+    - `batch_delay_sec`: Seconds between LLM batches (default: 5)
+    - `step2_noc_similarity_threshold`: Cosine similarity threshold (default: 0.65)
 
     **Trigger:** Manual only
     """,
@@ -504,7 +503,7 @@ with DAG(
         return stats
 
     # =========================================================================
-    # Step 5 — DB Load
+    # Step 4 — DB Load
     # =========================================================================
 
     @task
@@ -599,7 +598,7 @@ with DAG(
     #   → scale_workers_step3 (8 workers)
     #   → step3_enrich → v4                                (LLM NOC + seniority + skills)
     #   → stop_spark_workers                                (free worker resources)
-    #   → step5_load                                        (DB only, no Spark)
+    #   → step4_load                                        (DB only, no Spark)
     #   → stop_spark_cluster                                (cleanup)
     #
 

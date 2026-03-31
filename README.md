@@ -32,7 +32,7 @@ flowchart LR
 
     USER -- "manual start" --> AIRFLOW
     AIRFLOW -. "ensure_db<br/>(market-trend)" .-> DB
-    AIRFLOW -. "TBD<br/>(matching-insights)" .-> SPARK
+    AIRFLOW -. "skill-demand" .-> SPARK
     AIRFLOW --- NET
     DB --- NET
     SPARK --- NET
@@ -51,7 +51,7 @@ For detailed architecture, see [infra/SPEC.md](infra/SPEC.md).
 | Stream | Source | Volume | Processing | Status |
 |--------|--------|--------|------------|--------|
 | **Market Trend** | Canada Job Bank Open Data | ~3.3M rows | Python + pandas | Completed |
-| **Matching Insights** | LinkedIn/Kaggle | ~123K rows | Spark + Claude LLM | Under Construction |
+| **Skill Demand** | LinkedIn/Kaggle | ~123K rows | Spark + Claude LLM | E2E verified on sample |
 
 ### Repo Structure
 
@@ -59,10 +59,10 @@ For detailed architecture, see [infra/SPEC.md](infra/SPEC.md).
 Giljobi-DataPipeline/
 ├── dags/                          # Airflow DAGs (one per stream)
 │   ├── market_trend_dag.py
-│   └── matching_insights_preprocessing_dag.py
+│   └── skill_demand_dag.py
 ├── pipelines/
 │   ├── market-trend/              # Job Bank ETL — SPEC / RUNBOOK
-│   └── matching-insights/         # LinkedIn pre-processing + LLM
+│   └── skill-demand/              # LinkedIn pre-processing + LLM
 ├── infra/                         # Modular infrastructure — SPEC
 └── data/                          # Local data (gitignored)
 ```
@@ -111,9 +111,69 @@ py main.py --db "postgresql://..."  # Custom DB (e.g., Neon)
 
 See [pipelines/market-trend/RUNBOOK.md](pipelines/market-trend/RUNBOOK.md) for full documentation.
 
-## Matching Insights Pipeline
+## Skill Demand Pipeline
 
-> Under Construction — This stream is being restructured to integrate with the new modular infrastructure and DAG-managed Spark orchestration.
+Analyzes ~124K LinkedIn job postings to answer: **which skills are most demanded per occupation and seniority level?**
+
+| Step | Processing | Technology |
+|---|---|---|
+| Step 1 | Extract columns from CSV | Pandas |
+| Step 2 | NOC occupation matching + seniority detection | PySpark + Sentence Transformers |
+| Step 3 | LLM enrichment — NOC (unmatched) + seniority (missing) + skills (4 categories) | PySpark + Claude Haiku CLI |
+| Step 4 | Load into PostgreSQL | psycopg2 |
+
+**Skill Categories:** `hard_skill` (Python, data modeling) · `soft_skill` (communication, leadership) · `tool` (Excel, AWS, Docker) · `certification` (CPA, PMP)
+
+### DAG Overview
+
+![Airflow DAG List](images/airflow-dag-list.png)
+
+### DAG Graph — Full Pipeline
+
+E2E pipeline verified on 486-row sample. All tasks green. Dynamic worker scaling between Step 2 (4 workers, memory-heavy) and Step 3 (8 workers, IO-heavy).
+
+![DAG Full Pipeline](images/skill-demand-dag-full-pipeline.png)
+
+### DAG Graph — Step 3 Detail
+
+Step 3 (LLM Enrich) processes all rows with similarity-based adaptive batching. `scale_workers_step3` scales to 8 workers before execution. `step3_enrich` hover shows task duration and status.
+
+![DAG Step 3 Detail](images/skill-demand-dag-step3-detail.png)
+
+### Configurable Parameters
+
+All parameters adjustable at trigger time via Airflow UI — no code changes needed.
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `step2_input_file` | `step1_extracted_sample.parquet` | [Test only] Switch between sample and full dataset |
+| `step2_noc_similarity_threshold` | `0.65` | Minimum cosine similarity to accept a NOC match |
+| `step2_workers` / `step3_workers` | `4` / `8` | Spark worker count per step (dynamic scaling) |
+| `step2_executor_memory` / `step3_executor_memory` | `2g` / `512m` | Step 2 is memory-heavy (ST model), Step 3 is IO-heavy (LLM) |
+| `step2_partitions` | `16` | Checkpoint granularity (~8K rows each at 124K) |
+| `batch_delay_sec` | `5` | Seconds between LLM calls (rate limiting) |
+
+![DAG Params](images/skill-demand-dag-params.png)
+
+### Step 2 — Sentence Transformers NOC Matching + Seniority
+
+Checkpoint resume with validation: `16 valid, 0 corrupted, 0 to reprocess`. NOC match rate 25.9%, seniority 82.5% (CSV + title keyword, no LLM).
+
+![Step 2 Log](images/skill-demand-step2-log.png)
+
+### Step 3 — LLM Enrich (NOC + Seniority + Skills)
+
+Similarity-based adaptive batch grouping, checkpoint resume with corrupted detection. Final: NOC 96.5%, seniority 100%, skills 96.9% (avg 7.7 skills/posting).
+
+![Step 3 Log](images/skill-demand-step3-log.png)
+
+### DAG Documentation
+
+Pipeline description rendered in Airflow UI via `doc_md`.
+
+![DAG Trigger](images/skill-demand-dag-trigger.png)
+
+For full pipeline specification, see [pipelines/skill-demand/SPEC.md](pipelines/skill-demand/SPEC.md).
 
 ## Technology Stack
 
