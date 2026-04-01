@@ -97,7 +97,7 @@ with DAG(
     1. Download dataset from Kaggle API
     2. Extract columns + ST NOC matching + seniority (CSV + keyword)
     3. LLM Enrich: NOC (unmatched) + seniority (missing) + skills (4 categories)
-    4. Load into skill-demand PostgreSQL (jd_postings + jd_skills with category)
+    4. Load into skill-demand PostgreSQL (star schema: dim + fact tables)
 
     **Spark Features:** Broadcast Join, mapPartitionsWithIndex, checkpoint resume
     **LLM:** Claude Haiku CLI (subscription, similarity-based adaptive batch)
@@ -500,8 +500,12 @@ with DAG(
         if bps > 0 and total_calls > 0:
             sessions_needed = (total_calls + bps - 1) // bps
             cooldown = params['session_cooldown_min']
-            total_hours = sessions_needed * (cooldown / 60)
+            sec_per_call = params['batch_delay_sec'] + 6  # ~6s LLM response + batch_delay
+            processing_hours = (total_calls * sec_per_call) / 3600
+            cooldown_hours = (sessions_needed - 1) * (cooldown / 60)
+            total_hours = processing_hours + cooldown_hours
             print(f"  (e.g. at {bps} batches/session, {cooldown} min cooldown → ~{sessions_needed} sessions, ~{total_hours:.1f} hours)")
+            print(f"  (processing ~{processing_hours:.1f}h + cooldown ~{cooldown_hours:.1f}h)")
 
     # =========================================================================
     # Step 3 — LLM Enrich: NOC + Seniority + Skills
@@ -663,12 +667,16 @@ with DAG(
 
     @task(task_id="sd_step4", task_display_name="Step 4: DB Load")
     def step4_load():
-        """Load enriched data into skill-demand PostgreSQL."""
+        """Load enriched data into skill-demand PostgreSQL (Star Schema). Full rebuild each run."""
         import pandas as pd
         import psycopg2
-        from src.step4_load import prepare_postings_rows, prepare_skills_rows, load_postings, load_skills
+        from src.step4_load import (
+            explode_skills, normalize_skills, drop_star_schema,
+            load_dim_seniority, load_dim_companies, load_dim_skills,
+            load_fact_postings, load_fact_skills,
+        )
 
-        # Load input + quality filter (same as bridge_34 review)
+        # 1. Load input + quality filter
         input_path = f"{PROCESSED_DIR}/step3/step3_enriched.parquet"
         df_raw = pd.read_parquet(input_path)
         has_noc = df_raw["noc_id"].notna()
@@ -677,43 +685,78 @@ with DAG(
         df = df_raw[has_noc & has_skills & has_seniority].copy()
         print(f"[SD:STEP4] Input: {input_path} ({len(df_raw):,} total, {len(df):,} after quality filter)")
 
+        # 2. Skill normalization (inflect singular + category majority vote)
+        raw_skill_rows = explode_skills(df)
+        unique_before = len(set(r["skill"] for r in raw_skill_rows))
+
+        skill_rows, dim_skills_dict, norm_stats = normalize_skills(raw_skill_rows)
+        plural_map = norm_stats["plural_map"]
+        multi_cat = norm_stats["category_votes"]
+
+        print(f"[SD:STEP4] === Skill Normalization ===")
+        print(f"  Before: {len(raw_skill_rows):,} entries, {unique_before:,} unique names")
+        print(f"  1) Plural→Singular: {len(plural_map):,} plural forms found, merged into singular")
+        if plural_map:
+            for plural, singular in sorted(plural_map.items())[:5]:
+                print(f"     e.g. '{plural}' → '{singular}'")
+        print(f"  2) Category majority: {len(multi_cat):,} skills had multiple categories, resolved by vote")
+        if multi_cat:
+            top_multi = sorted(multi_cat.items(), key=lambda x: -sum(x[1].values()))[:5]
+            for name, votes in top_multi:
+                winner = votes.most_common(1)[0][0]
+                breakdown = ", ".join(f"{cat}({cnt})" for cat, cnt in votes.most_common())
+                print(f"     e.g. '{name}': {breakdown} → {winner}")
+        print(f"  After:  {len(skill_rows):,} entries, {len(dim_skills_dict):,} unique names")
+
         conn = psycopg2.connect(SD_DB_CONN)
         conn.autocommit = True
 
         try:
-            # Create tables if not exist
+            # 3. Drop + recreate schema (full rebuild — data warehouse pattern)
+            drop_star_schema(conn)
             cur = conn.cursor()
-            print(f"[SD:STEP4] Creating schema from {PIPELINE_DIR}/schema.sql...")
+            print(f"[SD:STEP4] Schema: drop + recreate from {PIPELINE_DIR}/schema.sql...")
             cur.execute(open(f"{PIPELINE_DIR}/schema.sql").read())
             cur.close()
             print(f"[SD:STEP4] Schema ready.")
 
-            # Insert postings
-            posting_rows = prepare_postings_rows(df)
-            count_postings = load_postings(posting_rows, conn)
-            print(f"[SD:STEP4] {count_postings} postings inserted.")
+            # 4. Load dimensions
+            seniority_map = load_dim_seniority(conn)
+            print(f"[SD:STEP4] dim_seniority: {len(seniority_map)} levels")
 
-            # Insert skills
-            skill_data = df[["job_id", "skills"]].to_dict("records")
-            skill_rows = prepare_skills_rows(skill_data)
-            count_skills = load_skills(skill_rows, conn)
-            print(f"[SD:STEP4] {count_skills} skills inserted.")
+            companies = df["company_name"].dropna().unique().tolist()
+            company_map = load_dim_companies(companies, conn)
+            print(f"[SD:STEP4] dim_companies: {len(company_map):,} companies")
 
-            # Verify
+            skill_map = load_dim_skills(dim_skills_dict, conn)
+            print(f"[SD:STEP4] dim_skills: {len(skill_map):,} skills")
+
+            # 5. Load facts
+            count_postings = load_fact_postings(df, company_map, seniority_map, conn)
+            print(f"[SD:STEP4] fact_job_postings: {count_postings:,} inserted")
+
+            count_skills = load_fact_skills(skill_rows, skill_map, conn)
+            print(f"[SD:STEP4] fact_job_skill_demand: {count_skills:,} inserted")
+
+            # 6. Verify
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM jd_postings")
+            cur.execute("SELECT COUNT(*) FROM fact_job_postings")
             db_postings = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM jd_skills")
+            cur.execute("SELECT COUNT(*) FROM fact_job_skill_demand")
             db_skills = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(DISTINCT skill) FROM jd_skills")
-            unique_skills = cur.fetchone()[0]
-            cur.execute("SELECT category, COUNT(*) FROM jd_skills GROUP BY category ORDER BY COUNT(*) DESC")
+            cur.execute("SELECT COUNT(*) FROM dim_skills")
+            db_dim_skills = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM dim_companies")
+            db_dim_companies = cur.fetchone()[0]
+            cur.execute("SELECT category, COUNT(*) FROM dim_skills GROUP BY category ORDER BY COUNT(*) DESC")
             cat_counts = cur.fetchall()
             cur.close()
 
             print(f"[SD:STEP4] === DB Verification ===")
-            print(f"  jd_postings: {db_postings} rows")
-            print(f"  jd_skills: {db_skills} entries ({unique_skills} unique skills)")
+            print(f"  dim_companies:         {db_dim_companies:,}")
+            print(f"  dim_skills:            {db_dim_skills:,}")
+            print(f"  fact_job_postings:     {db_postings:,}")
+            print(f"  fact_job_skill_demand: {db_skills:,} entries")
             for cat, cnt in cat_counts:
                 print(f"    {cat}: {cnt}")
         finally:
@@ -725,32 +768,36 @@ with DAG(
 
     @task(task_id="sd_final", task_display_name="Pipeline Complete: Final Summary")
     def step4_review_final_summary():
-        """Review DB load results + final pipeline summary."""
+        """Review DB load results + final pipeline summary (Star Schema)."""
         import psycopg2
 
         conn = psycopg2.connect(SD_DB_CONN)
         cur = conn.cursor()
 
         # --- Step 4 Review ---
-        cur.execute("SELECT COUNT(*) FROM jd_postings")
+        cur.execute("SELECT COUNT(*) FROM fact_job_postings")
         db_postings = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM jd_skills")
-        db_skills = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM fact_job_skill_demand")
+        db_skill_facts = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM dim_skills")
+        db_dim_skills = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM dim_companies")
+        db_dim_companies = cur.fetchone()[0]
 
         print(f"[SD:STEP4:REVIEW]")
-        print(f"  jd_postings: {db_postings:,} rows")
-        print(f"  jd_skills: {db_skills:,} entries")
+        print(f"  fact_job_postings:     {db_postings:,}")
+        print(f"  fact_job_skill_demand: {db_skill_facts:,} entries")
+        print(f"  dim_skills:            {db_dim_skills:,}")
+        print(f"  dim_companies:         {db_dim_companies:,}")
 
         # --- Final Pipeline Summary ---
-        cur.execute("SELECT COUNT(*) FROM jd_postings WHERE noc_id IS NOT NULL")
+        cur.execute("SELECT COUNT(*) FROM fact_job_postings WHERE noc_id IS NOT NULL")
         with_noc = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM jd_postings WHERE seniority IS NOT NULL")
+        cur.execute("SELECT COUNT(*) FROM fact_job_postings WHERE seniority_id IS NOT NULL")
         with_sen = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(DISTINCT skill) FROM jd_skills")
-        unique_skills = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(DISTINCT n.noc21_code) FROM jd_postings p JOIN noc_titles n ON p.noc_id = n.id")
+        cur.execute("SELECT COUNT(DISTINCT n.noc21_code) FROM fact_job_postings p JOIN noc_titles n ON p.noc_id = n.id")
         noc_covered = cur.fetchone()[0]
-        cur.execute("SELECT ROUND(AVG(cnt)::numeric, 1) FROM (SELECT COUNT(*) as cnt FROM jd_skills GROUP BY jd_id) sub")
+        cur.execute("SELECT ROUND(AVG(cnt)::numeric, 1) FROM (SELECT COUNT(*) as cnt FROM fact_job_skill_demand GROUP BY job_id) sub")
         avg_skills = cur.fetchone()[0]
 
         print(f"\n{'='*60}")
@@ -760,23 +807,34 @@ with DAG(
         print(f"  NOC classified:  {with_noc:,} ({with_noc/db_postings*100:.1f}%)")
         print(f"  Seniority:       {with_sen:,} ({with_sen/db_postings*100:.1f}%)")
         print(f"  NOC coverage:    {noc_covered} / 510 categories")
-        print(f"  Skills:          {db_skills:,} total, {unique_skills:,} unique")
+        print(f"  Skills:          {db_skill_facts:,} fact entries, {db_dim_skills:,} unique (normalized)")
         print(f"  Avg skills/post: {avg_skills}")
 
-        # Category breakdown
-        cur.execute("SELECT category, COUNT(*) FROM jd_skills GROUP BY category ORDER BY COUNT(*) DESC")
-        print(f"\n  Skill Categories:")
+        # Category breakdown (from dim_skills)
+        cur.execute("SELECT category, COUNT(*) FROM dim_skills GROUP BY category ORDER BY COUNT(*) DESC")
+        print(f"\n  Skill Categories (dim_skills):")
         for cat, cnt in cur.fetchall():
             print(f"    {cat:<15} {cnt:>8,}")
 
         # Seniority breakdown
-        cur.execute("SELECT COALESCE(seniority, 'unknown') as sen, COUNT(*) FROM jd_postings GROUP BY seniority ORDER BY COUNT(*) DESC")
+        cur.execute("""
+            SELECT ds.level, COUNT(*)
+            FROM fact_job_postings p
+            JOIN dim_seniority ds ON p.seniority_id = ds.id
+            GROUP BY ds.level ORDER BY COUNT(*) DESC
+        """)
         print(f"\n  Seniority:")
         for sen, cnt in cur.fetchall():
             print(f"    {sen:<15} {cnt:>8,}")
 
-        # Top 10 skills
-        cur.execute("SELECT skill, category, COUNT(*) as cnt FROM jd_skills GROUP BY skill, category ORDER BY cnt DESC LIMIT 10")
+        # Top 10 skills (from fact + dim join)
+        cur.execute("""
+            SELECT sk.name, sk.category, COUNT(*) as cnt
+            FROM fact_job_skill_demand f
+            JOIN dim_skills sk ON f.skill_id = sk.id
+            GROUP BY sk.name, sk.category
+            ORDER BY cnt DESC LIMIT 10
+        """)
         print(f"\n  Top 10 Skills:")
         print(f"    {'Skill':<30} {'Category':<15} {'Count':>6}")
         print(f"    {'-'*55}")
@@ -785,20 +843,22 @@ with DAG(
 
         # Sample 10 postings
         cur.execute("""
-            SELECT p.company, p.raw_title, n.noc21_name, p.seniority,
-                   (SELECT COUNT(*) FROM jd_skills s WHERE s.jd_id = p.job_id) as skills,
-                   (SELECT STRING_AGG(s.skill, ', ')
-                    FROM (SELECT skill FROM jd_skills WHERE jd_id = p.job_id ORDER BY skill LIMIT 3) s
+            SELECT dc.name, p.raw_title, ds.level,
+                   (SELECT COUNT(*) FROM fact_job_skill_demand f WHERE f.job_id = p.job_id) as skills,
+                   (SELECT STRING_AGG(sk.name, ', ')
+                    FROM (SELECT skill_id FROM fact_job_skill_demand WHERE job_id = p.job_id LIMIT 3) f2
+                    JOIN dim_skills sk ON f2.skill_id = sk.id
                    ) as top_skills
-            FROM jd_postings p
-            LEFT JOIN noc_titles n ON p.noc_id = n.id
+            FROM fact_job_postings p
+            LEFT JOIN dim_companies dc ON p.company_id = dc.id
+            LEFT JOIN dim_seniority ds ON p.seniority_id = ds.id
             WHERE p.noc_id IS NOT NULL
             ORDER BY RANDOM() LIMIT 10
         """)
         print(f"\n  Sample 10 Postings:")
         print(f"    {'Company':<25} {'Title':<30} {'Seniority':<12} {'#':>3} {'Top Skills'}")
         print(f"    {'-'*100}")
-        for company, title, noc, sen, skills_cnt, top_skills in cur.fetchall():
+        for company, title, sen, skills_cnt, top_skills in cur.fetchall():
             co = (company or "")[:24]
             ti = (title or "")[:29]
             sn = (sen or "?")[:11]
