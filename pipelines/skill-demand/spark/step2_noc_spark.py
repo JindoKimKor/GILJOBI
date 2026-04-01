@@ -56,31 +56,31 @@ import json
 import numpy as np
 import pandas as pd
 
-print(f"[STEP 2] Loading input: {args.input}")
+print(f"[SD:STEP2] Loading input: {args.input}")
 df = spark.read.parquet(args.input)
 total_rows = df.count()
 # Repartition to match worker count for parallel processing
 num_partitions = args.partitions
 df = df.repartition(num_partitions)
-print(f"[STEP 2] {total_rows} rows loaded, {num_partitions} partitions (~{total_rows // num_partitions} rows/partition).")
+print(f"[SD:STEP2] {total_rows} rows loaded, {num_partitions} partitions (~{total_rows // num_partitions} rows/partition).")
 
 # Load NOC titles from DB
-print(f"[STEP 2] Loading NOC titles from DB...")
+print(f"[SD:STEP2] Loading NOC titles from DB...")
 noc_pd = pd.read_sql(
     "SELECT id, noc21_code, noc21_name FROM noc_titles WHERE LENGTH(noc21_code) = 5",
     args.db_conn,
 )
-print(f"[STEP 2] {len(noc_pd)} NOC unit groups loaded.")
+print(f"[SD:STEP2] {len(noc_pd)} NOC unit groups loaded.")
 
 # =============================================================================
 # Encode NOC Titles (Driver)
 # =============================================================================
 from sentence_transformers import SentenceTransformer
 
-print("[STEP 2] Loading Sentence Transformers model...")
+print("[SD:STEP2] Loading Sentence Transformers model...")
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
-print("[STEP 2] Encoding NOC titles...")
+print("[SD:STEP2] Encoding NOC titles...")
 noc_names = noc_pd["noc21_name"].tolist()
 noc_ids = noc_pd["id"].tolist()
 noc_embeddings = model.encode(noc_names, normalize_embeddings=True)
@@ -130,11 +130,11 @@ existing_set = set(valid_cps)
 missing_cps = sorted(expected_partitions - existing_set)
 
 if valid_cps or corrupted_cps:
-    print(f"[STEP 2] Resuming — {len(valid_cps)} valid, {len(corrupted_cps)} corrupted (deleted), {len(missing_cps)} to reprocess")
+    print(f"[SD:STEP2] Resuming — {len(valid_cps)} valid, {len(corrupted_cps)} corrupted (deleted), {len(missing_cps)} to reprocess")
     if corrupted_cps:
-        print(f"[STEP 2]   Corrupted: {corrupted_cps}")
+        print(f"[SD:STEP2]   Corrupted: {corrupted_cps}")
     if missing_cps:
-        print(f"[STEP 2]   Missing: {missing_cps}")
+        print(f"[SD:STEP2]   Missing: {missing_cps}")
 
 ENCODE_CHUNK_SIZE = 1000  # encode + match in chunks for progress reporting
 
@@ -246,7 +246,7 @@ def match_partition(partition_idx, rows):
 # =============================================================================
 import datetime
 
-print(f"[STEP 2] Starting NOC matching (threshold={threshold})...")
+print(f"[SD:STEP2] Starting NOC matching (threshold={threshold})...")
 start = datetime.datetime.now()
 
 # Progress monitor — reads worker progress files every 15s from a separate thread
@@ -271,7 +271,7 @@ def _progress_monitor():
                     total_unmatched += data["unmatched"]
             if total_done > 0:
                 import sys
-                print(f"[STEP 2] Progress: {total_done}/{total_rows} ({total_done/total_rows*100:.1f}%) — matched: {total_matched}, unmatched: {total_unmatched}")
+                print(f"[SD:STEP2] Progress: {total_done}/{total_rows} ({total_done/total_rows*100:.1f}%) — matched: {total_matched}, unmatched: {total_unmatched}")
                 sys.stdout.flush()
         except Exception:
             pass
@@ -301,7 +301,7 @@ unmatched_out = total_out - matched_out
 seniority_counts = result_pd["seniority"].value_counts(dropna=False)
 seniority_filled = int(result_pd["seniority"].notna().sum())
 
-print(f"\n[STEP 2] === Summary ===")
+print(f"\n[SD:STEP2] === Summary ===")
 print(f"  Total:      {total_out}")
 print(f"  Matched:    {matched_out}")
 print(f"  Unmatched:  {unmatched_out}")

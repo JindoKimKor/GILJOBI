@@ -51,7 +51,7 @@ def validate_enrich(df: pd.DataFrame) -> dict:
     invalid_seniority = len(non_null) - valid_seniority
 
     # --- Skills ---
-    skill_counts = df["skills"].apply(lambda x: len(x) if isinstance(x, list) else 0)
+    skill_counts = df["skills"].apply(lambda x: len(x) if hasattr(x, '__len__') else 0)
     empty_skills = int((skill_counts == 0).sum())
     with_skills = total - empty_skills
     avg_skills = float(skill_counts.mean())
