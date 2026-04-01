@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS jd_skills (
     skill VARCHAR(100) NOT NULL,
     category VARCHAR(20) NOT NULL CHECK (category IN (
         'hard_skill', 'soft_skill', 'tool', 'certification'
-    ))
+    )),
+    UNIQUE (jd_id, skill, category)
 );
 
 CREATE OR REPLACE VIEW skill_demand_summary AS
