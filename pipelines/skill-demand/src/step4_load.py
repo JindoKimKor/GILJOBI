@@ -148,14 +148,13 @@ def drop_star_schema(conn):
 # =============================================================================
 # Bulk Loaders (COPY)
 # =============================================================================
-def _copy_from_dicts(cur, table: str, columns: list[str], rows: list[dict]):
-    """Bulk insert using COPY FROM with in-memory CSV buffer."""
-    buf = io.StringIO()
-    writer = csv.writer(buf, delimiter='\t')
-    for row in rows:
-        writer.writerow([row.get(col) for col in columns])
-    buf.seek(0)
-    cur.copy_from(buf, table, columns=columns, null='None')
+def _to_tsv_value(val):
+    """Convert Python value to COPY-safe TSV string. None → \\N, escape special chars."""
+    if val is None:
+        return "\\N"
+    s = str(val)
+    s = s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+    return s
 
 
 def load_dim_seniority(conn) -> dict:
@@ -178,9 +177,9 @@ def load_dim_companies(companies: list[str], conn) -> dict:
     writer = csv.writer(buf, delimiter='\t')
     for name in companies:
         if name and not _is_null(name):
-            writer.writerow([name])
+            writer.writerow([_to_tsv_value(name)])
     buf.seek(0)
-    cur.copy_from(buf, "dim_companies", columns=["name"], null='None')
+    cur.copy_from(buf, "dim_companies", columns=["name"], null='\\N')
     conn.commit()
     cur.execute("SELECT name, id FROM dim_companies")
     mapping = {row[0]: row[1] for row in cur.fetchall()}
@@ -195,9 +194,9 @@ def load_dim_skills(dim_skills: dict, conn) -> dict:
     writer = csv.writer(buf, delimiter='\t')
     for name, category in dim_skills.items():
         if name:
-            writer.writerow([name, category])
+            writer.writerow([_to_tsv_value(name), _to_tsv_value(category)])
     buf.seek(0)
-    cur.copy_from(buf, "dim_skills", columns=["name", "category"], null='None')
+    cur.copy_from(buf, "dim_skills", columns=["name", "category"], null='\\N')
     conn.commit()
     cur.execute("SELECT name, id FROM dim_skills")
     mapping = {row[0]: row[1] for row in cur.fetchall()}
@@ -218,21 +217,21 @@ def load_fact_postings(df: pd.DataFrame, company_map: dict, seniority_map: dict,
         seniority_id = seniority_map.get(seniority) if not _is_null(seniority) else None
 
         writer.writerow([
-            int(row["job_id"]),
-            company_id,
-            None if _is_null(row.get("noc_id")) else int(row["noc_id"]),
-            seniority_id,
-            row.get("title"),
-            None if _is_null(row.get("noc_match_score")) else float(row["noc_match_score"]),
-            None if _is_null(row.get("noc_match_method")) else row["noc_match_method"],
-            row.get("description"),
+            _to_tsv_value(int(row["job_id"])),
+            _to_tsv_value(company_id),
+            _to_tsv_value(None if _is_null(row.get("noc_id")) else int(row["noc_id"])),
+            _to_tsv_value(seniority_id),
+            _to_tsv_value(row.get("title")),
+            _to_tsv_value(None if _is_null(row.get("noc_match_score")) else float(row["noc_match_score"])),
+            _to_tsv_value(None if _is_null(row.get("noc_match_method")) else row["noc_match_method"]),
+            _to_tsv_value(row.get("description")),
         ])
         count += 1
     buf.seek(0)
     cur.copy_from(buf, "fact_job_postings",
                   columns=["job_id", "company_id", "noc_id", "seniority_id",
                            "raw_title", "noc_match_score", "noc_match_method", "description"],
-                  null='None')
+                  null='\\N')
     conn.commit()
     cur.close()
     return count
@@ -253,10 +252,10 @@ def load_fact_skills(skill_rows: list[dict], skill_map: dict, conn) -> int:
         if key in seen:
             continue
         seen.add(key)
-        writer.writerow([row["job_id"], skill_id])
+        writer.writerow([_to_tsv_value(row["job_id"]), _to_tsv_value(skill_id)])
         count += 1
     buf.seek(0)
-    cur.copy_from(buf, "fact_job_skill_demand", columns=["job_id", "skill_id"], null='None')
+    cur.copy_from(buf, "fact_job_skill_demand", columns=["job_id", "skill_id"], null='\\N')
     conn.commit()
     cur.close()
     return count

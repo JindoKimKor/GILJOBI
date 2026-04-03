@@ -540,6 +540,15 @@ with DAG(
         progress_dir = f"{PROCESSED_DIR}/step3/progress"
         last_progress = ""
 
+        # Clear previous progress before polling (race condition: DAG reads before Spark job resets)
+        # Note: can't rmtree — dir owned by Spark (root), Airflow user can't delete dir itself
+        from pathlib import Path as _Path
+        for pf in _Path(progress_dir).glob("*.json"):
+            try:
+                pf.unlink()
+            except OSError:
+                pass
+
         while True:
             state = hook.get_batch_state(batch_id)
 
@@ -770,11 +779,22 @@ with DAG(
     def step4_review_final_summary():
         """Review DB load results + final pipeline summary (Star Schema)."""
         import psycopg2
+        import pandas as pd
+
+        # --- Read original parquet for total/filter stats ---
+        input_path = f"{PROCESSED_DIR}/step3/step3_enriched.parquet"
+        df_raw = pd.read_parquet(input_path)
+        total_processed = len(df_raw)
+        has_noc_raw = df_raw["noc_id"].notna()
+        has_skills_raw = df_raw["skills"].apply(lambda x: len(x) if hasattr(x, '__len__') else 0).gt(0)
+        has_seniority_raw = df_raw["seniority"].notna() & ~df_raw["seniority"].isin(["NaN", "nan", "None", ""])
+        total_complete = int((has_noc_raw & has_skills_raw & has_seniority_raw).sum())
+        total_dropped = total_processed - total_complete
 
         conn = psycopg2.connect(SD_DB_CONN)
         cur = conn.cursor()
 
-        # --- Step 4 Review ---
+        # --- DB stats ---
         cur.execute("SELECT COUNT(*) FROM fact_job_postings")
         db_postings = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM fact_job_skill_demand")
@@ -803,9 +823,15 @@ with DAG(
         print(f"\n{'='*60}")
         print(f"  SD:FINAL — PIPELINE COMPLETE")
         print(f"{'='*60}")
-        print(f"  Postings:        {db_postings:,}")
-        print(f"  NOC classified:  {with_noc:,} ({with_noc/db_postings*100:.1f}%)")
-        print(f"  Seniority:       {with_sen:,} ({with_sen/db_postings*100:.1f}%)")
+        print(f"  Total dataset:   123,782")
+        print(f"  Processed:       {total_processed:,} ({total_processed/123782*100:.1f}%)")
+        print(f"  Quality filter:  {total_dropped:,} dropped ({total_dropped/total_processed*100:.1f}%)")
+        print(f"    Missing NOC:       {int((~has_noc_raw).sum()):,}")
+        print(f"    Missing skills:    {int((~has_skills_raw).sum()):,}")
+        print(f"    Missing seniority: {int((~has_seniority_raw).sum()):,}")
+        print(f"  DB loaded:       {db_postings:,} ({db_postings/123782*100:.1f}% of total)")
+        print(f"  NOC classified:  {with_noc:,}/{db_postings:,} ({with_noc/db_postings*100:.1f}%)")
+        print(f"  Seniority:       {with_sen:,}/{db_postings:,} ({with_sen/db_postings*100:.1f}%)")
         print(f"  NOC coverage:    {noc_covered} / 510 categories")
         print(f"  Skills:          {db_skill_facts:,} fact entries, {db_dim_skills:,} unique (normalized)")
         print(f"  Avg skills/post: {avg_skills}")

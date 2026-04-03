@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS dim_companies (
 
 CREATE TABLE IF NOT EXISTS dim_skills (
     id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL UNIQUE,
+    name VARCHAR(300) NOT NULL UNIQUE,
     category VARCHAR(20) NOT NULL CHECK (category IN (
         'hard_skill', 'soft_skill', 'tool', 'certification'
     ))
