@@ -63,7 +63,7 @@ Step 3: LLM Enrich — ALL rows processed with 2 prompt types:
   Adaptive Batch Strategy (similarity-based grouping)
   Skills categorized: hard_skill, soft_skill, tool, certification
   ↓ V4 (NOC + seniority + skills validation)
-Step 4: DB Load (jd_postings + jd_skills with category)
+Step 4: Skill Normalization (inflect + category vote) → Star Schema DB Load (COPY bulk)
 ```
 
 ### DAG Task Flow (Airflow)
@@ -323,29 +323,39 @@ start_spark_cluster (Master + Livy only)
 - Threading print: Livy `LineBufferedStream` doesn't capture from non-main threads during `collect()` block
 - Solution: Workers write files to shared volume, Airflow reads directly in polling loop
 
-## DB Schema
+## DB Schema (Star Schema)
 
-### Table: `jd_postings`
+Full rebuild each run: drop → create → COPY bulk insert (data warehouse pattern).
 
-| Column | Type | Constraint | Description |
+### Dimensions
+
+| Table | Column | Type | Constraint |
 |---|---|---|---|
-| `id` | SERIAL | PRIMARY KEY | Auto-generated |
-| `company` | VARCHAR(300) | | Company name |
-| `raw_title` | VARCHAR(300) | NOT NULL | Original job title |
-| `noc_id` | INT | FK → noc_titles(id) | NULL if no match (2.1%) |
-| `noc_match_score` | NUMERIC(4,3) | | ST cosine score; NULL for LLM |
-| `noc_match_method` | VARCHAR(30) | | `sentence_transformer` or `llm_noc_match` |
-| `seniority` | VARCHAR(50) | CHECK enum | intern/entry_level/mid_level/senior/executive |
-| `description` | TEXT | | Full JD text |
+| **dim_companies** | `id` | SERIAL | PK |
+| | `name` | VARCHAR(300) | UNIQUE |
+| **dim_skills** | `id` | SERIAL | PK |
+| | `name` | VARCHAR(300) | UNIQUE (normalized: inflect singular + category majority) |
+| | `category` | VARCHAR(20) | CHECK (hard_skill, soft_skill, tool, certification) |
+| **dim_seniority** | `id` | SERIAL | PK |
+| | `level` | VARCHAR(20) | UNIQUE CHECK (intern, entry_level, mid_level, senior, executive) |
+| **noc_titles** | `id` | SERIAL | PK |
+| | `noc21_code` | VARCHAR(10) | UNIQUE |
+| | `noc21_name` | VARCHAR(200) | |
 
-### Table: `jd_skills`
+### Facts
 
-| Column | Type | Constraint | Description |
+| Table | Column | Type | Constraint |
 |---|---|---|---|
-| `id` | SERIAL | PRIMARY KEY | |
-| `jd_id` | INT | FK → jd_postings(job_id) | |
-| `skill` | VARCHAR(100) | NOT NULL | Lowercase (e.g. "python", "data modeling") |
-| `category` | VARCHAR(20) | NOT NULL | `hard_skill`, `soft_skill`, `tool`, `certification` |
+| **fact_job_postings** | `job_id` | BIGINT | PK |
+| | `company_id` | INT | FK → dim_companies |
+| | `noc_id` | INT | FK → noc_titles |
+| | `seniority_id` | INT | FK → dim_seniority |
+| | `raw_title` | VARCHAR(300) | NOT NULL |
+| | `noc_match_score` | NUMERIC(4,3) | |
+| | `noc_match_method` | VARCHAR(30) | |
+| | `description` | TEXT | |
+| **fact_job_skill_demand** | `job_id` | BIGINT | PK, FK → fact_job_postings |
+| | `skill_id` | INT | PK, FK → dim_skills |
 
 ### View: `skill_demand_summary`
 
@@ -357,6 +367,14 @@ ORDER BY demand_count DESC
 LIMIT 20;
 ```
 
+### Skill Normalization (Step 4)
+
+| Process | Description | Example |
+|---|---|---|
+| `inflect` plural→singular | English grammar-based singularization | "configurations" → "configuration" |
+| `KEEP_PLURAL` | Business terms preserved | "sales", "operations", "logistics" |
+| Category majority vote | Same skill, multiple categories → most frequent | "customer service": soft(4,424) vs hard(260) → soft |
+
 ## Key Technical Decisions
 
 | Decision | Choice | Rationale |
@@ -367,7 +385,11 @@ LIMIT 20;
 | Seniority | 3-tier: CSV (76.3%) → keyword (6.2%) → LLM (17.5%) | Minimize LLM usage, word boundary matching |
 | Skills | LLM from JD, 4 categories | hard_skill, soft_skill, tool, certification |
 | Step 3 design | 2 prompts (matched/unmatched), not 4 | Seniority handled per-row within prompt |
-| Batch strategy | Similarity-based grouping | Company + noc_id grouping for accuracy |
+| Batch strategy | Driver batch factory + priority overflow | Content-based batch_id (MD5 hash), worker-count independent |
+| Session control | Driver session loop | Exact batch count per `collect()`, not worker-level |
+| DB schema | Star schema (dim + fact) | Data warehouse pattern, full rebuild each run |
+| Skill normalization | inflect + KEEP_PLURAL + category majority | Dedup plurals, resolve multi-category, preserve business terms |
+| DB load | COPY bulk insert | 10x+ faster than row-by-row INSERT |
 | Spark submission | `@task + LivyHook` | Real-time log (vs LivyOperator state-only) |
 | Progress | Airflow reads worker files directly | Livy stdout unreliable (encoding/threading/blocking) |
 | Spark infra | Dedicated cluster (`spark-sd`) | Separate Dockerfiles with sentence-transformers + Claude CLI |
@@ -384,10 +406,10 @@ LIMIT 20;
 | Step 1 | ✅ | Column extraction + parquet |
 | Step 2 | ✅ | ST NOC match (0.65) + seniority (CSV + keyword) |
 | V3 | ✅ | Match rate stats |
-| Step 3 | 🔲 | LLM Enrich: NOC + seniority + skills (2 prompts, similarity-based batch) |
-| V4 | ✅ | Completion rate |
-| V5 | ✅ | Seniority/skills validation (code ready) |
-| Step 4 | ✅ | DB load (BIGINT PK, skill category, schema.sql) |
+| Step 3 | ✅ | LLM Enrich: Driver batch factory + session control (~24% complete, ~76% remaining) |
+| Bridge 3→4 | ✅ | Quality filter + job_id uniqueness check |
+| Step 4 | ✅ | Star schema: skill normalization (inflect) + COPY bulk load |
+| Final Summary | ✅ | Pipeline completion report with total/filtered/loaded stats |
 | DAG | ✅ | Full orchestration with resource lifecycle |
 | Infra | ✅ | Separate Spark-SD cluster |
 | Tests | 206 passing | step1(15) + step2_seniority(43) + step2_noc(11) + step3_enrich(36) + others |
@@ -402,9 +424,3 @@ See: `resources/datapipeline/aws-deployment-options.md`
 
 Apply same Spark patterns (Broadcast Join, UDF, Partitioned Write, Accumulator) to market-trend pipeline.
 See: `pipelines/market-trend/SPEC.md` Spark Features section.
-
-## Reference Documents
-
-- `resources/datapipeline/spark-cluster-architecture.md` — Spark architecture with mermaid diagrams
-- `resources/datapipeline/spark-job-submission-comparison.md` — Livy vs SparkSubmit + LivyHook architecture change
-- `resources/datapipeline/aws-deployment-options.md` — AWS Academy deployment + Terraform
