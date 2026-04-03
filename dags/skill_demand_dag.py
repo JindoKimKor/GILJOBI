@@ -116,7 +116,12 @@ with DAG(
     # Validate Required Params — fail fast before any work
     # =========================================================================
 
-    @task(task_id="sd_validate_params", task_display_name="Validate Params")
+    @task(task_id="sd_validate_params", task_display_name="Validate Params", doc_md="""
+### Validate Params
+Fail-fast guard: checks required params before any infrastructure starts.
+- `step2_input_file` must not be empty
+- Prints all trigger configuration params for audit
+""")
     def validate_params(**context):
         """Fail immediately if required params are missing."""
         params = context["params"]
@@ -138,6 +143,7 @@ with DAG(
         ensure_db = BashOperator(
             task_id="sd_ensure_db",
             task_display_name="Ensure DB",
+            doc_md="Start skill-demand PostgreSQL (port 5434) if not running. Idempotent — skips if already up.",
             bash_command=(
                 f"docker ps --filter name=skill-demand-db --filter status=running -q | grep -q . "
                 f"&& echo 'DB already running' "
@@ -155,6 +161,7 @@ with DAG(
         start_spark_cluster = BashOperator(
             task_id="sd_start_spark",
             task_display_name="Start Spark Cluster",
+            doc_md="Start Spark Master + Livy (no workers yet). Workers are scaled by bridge tasks based on step requirements.",
             bash_command=f"cd {INFRA_DIR} && bash up.sh spark-sd-cluster 2>&1",
         )
     else:
@@ -167,7 +174,15 @@ with DAG(
     # NOC Setup — Populate noc_titles in skill-demand DB
     # =========================================================================
 
-    @task(task_id="sd_load_noc", task_display_name="Seed NOC Codes")
+    @task(task_id="sd_load_noc", task_display_name="Seed NOC Codes", doc_md="""
+### Seed NOC Codes
+Download and load Canadian NOC 2021 occupation codes into `noc_titles` table.
+- Source: Statistics Canada NOC 2021 V1.0 classification CSV (direct download)
+- Filters to Level 5 (Unit Group) only → 510 entries
+- Creates `noc_titles` table (id, noc21_code, noc21_name)
+- Idempotent: skips if table already populated
+- Depends on: Ensure DB (needs PostgreSQL running)
+""")
     def noc_setup():
         """Download NOC 2021 master CSV and load into skill-demand DB."""
         import pandas as pd
@@ -225,7 +240,13 @@ with DAG(
     # Download — Kaggle Dataset
     # =========================================================================
 
-    @task(task_id="sd_download", task_display_name="Download Dataset")
+    @task(task_id="sd_download", task_display_name="Download Dataset", doc_md="""
+### Download Dataset
+Download LinkedIn job postings from Kaggle API.
+- Dataset: `arshkon/linkedin-job-postings` (~124K postings, 166.5MB zip)
+- Extracts `postings.csv` to `data/raw/skill-demand/`
+- Idempotent: skips if file already exists
+""")
     def download():
         """Download LinkedIn Job Postings from Kaggle API."""
         from pathlib import Path
@@ -238,7 +259,14 @@ with DAG(
     # V1 — Post-Download Validation
     # =========================================================================
 
-    @task(task_id="sd_validate_source", task_display_name="Validate Source")
+    @task(task_id="sd_validate_source", task_display_name="Validate Source", doc_md="""
+### Validate Source
+Verify downloaded CSV integrity before processing.
+- File exists and is readable
+- Required columns present: job_id, title, description, company_name
+- Row count check
+- Reports basic stats (total rows, null counts)
+""")
     def validate_v1(raw_dir: str):
         """Validate downloaded CSV: file integrity, required columns."""
         import os
@@ -257,7 +285,13 @@ with DAG(
     # Step 1 — Column Extraction
     # =========================================================================
 
-    @task(task_id="sd_step1", task_display_name="Step 1: Extract Columns")
+    @task(task_id="sd_step1", task_display_name="Step 1: Extract Columns", doc_md="""
+### Step 1: Extract Columns
+Extract relevant columns from raw CSV → parquet.
+- Columns: job_id, company_name, title, description, formatted_experience_level
+- Drop rows with null title or description
+- **Output:** `step1_extracted.parquet`
+""")
     def step1_extract(csv_path: str):
         """Extract job_id, company_name, title, description → parquet."""
         from pathlib import Path
@@ -271,7 +305,14 @@ with DAG(
     # Step 1 Review + Step 2 Prep
     # =========================================================================
 
-    @task(task_id="sd_bridge_12", task_display_name="Step 1→2 Bridge")
+    @task(task_id="sd_bridge_12", task_display_name="Step 1→2 Bridge", doc_md="""
+### Step 1→2 Bridge
+Review Step 1 output + prepare Spark environment for Step 2.
+
+1. **Step 1 Review:** Row count, column verification, null stats
+2. **Worker Scaling:** Scale Spark workers for Step 2 (memory-heavy, fewer workers — default 4 × 2g)
+3. **Step 2 Preview:** NOC similarity threshold, partition count, executor config
+""")
     def step1_review_step2_prep(parquet_path: str, **context):
         """Review Step 1 output + clean data + scale workers for Step 2."""
         import subprocess
@@ -310,7 +351,23 @@ with DAG(
     # Step 2 — NOC Normalize (Sentence Transformers via Spark)
     # =========================================================================
 
-    @task(task_id="sd_step2", task_display_name="Step 2: NOC Match (ST)")
+    @task(task_id="sd_step2", task_display_name="Step 2: NOC Match (ST)", doc_md="""
+### Step 2: NOC Match (Sentence Transformers)
+Spark job via Livy: NOC occupation matching + seniority extraction.
+
+**NOC Matching:**
+- `all-MiniLM-L6-v2` model (384-dim embeddings)
+- Cosine similarity ≥ threshold (default 0.65) → matched
+- Below threshold → unmatched (sent to LLM in Step 3)
+- Broadcast Join: 510 NOC embeddings (~780KB) broadcast to all executors
+
+**Seniority Extraction:**
+- Priority 1: `formatted_experience_level` CSV column mapping
+- Priority 2: Title keyword matching (word boundary regex)
+- Remaining: sent to LLM in Step 3
+
+**Output:** `step2_normalized.parquet` (noc_id, noc_match_score, noc_match_method, seniority)
+""")
     def step2_noc(**context):
         """Step 2: NOC Normalize via Sentence Transformers (Spark/Livy with live logs)."""
         import time
@@ -390,19 +447,30 @@ with DAG(
     # =========================================================================
 
     @task(task_id="sd_bridge_23", task_display_name="Step 2→3 Bridge", doc_md="""
-### Step 2 Review + Step 3 Prep
+### Step 2→3 Bridge
+Review Step 2 output + prepare Spark for Step 3 LLM enrichment.
 
-**What this task does:**
-1. Reviews Step 2 output (NOC match rate, seniority distribution)
-2. Scales Spark workers for Step 3 (IO-heavy, more workers)
-3. Shows grouping preview (matched/unmatched LLM call estimate)
+**1. Step 2 Review:**
+- NOC match rate and avg similarity score
+- Seniority breakdown (CSV, keyword, null counts)
+- Matched vs unmatched row counts
 
-**Input:** `processed/step2/step2_normalized.parquet`
+**2. Worker Scaling:**
+- Scale Spark workers for Step 3 (IO-heavy, more workers — default 8 × 512m)
+- Step 2 was memory-heavy (model loading), Step 3 is IO-heavy (LLM calls)
 
-**Expected Logs:**
-- `[SD:STEP2:REVIEW]` — NOC match %, seniority breakdown
-- `[SD:STEP3:PREP]` — worker count, memory, session control config
-- `[SD:STEP3:GROUPING]` — P1/P2/remaining batches, estimated LLM calls
+**3. Grouping Preview — Adaptive Batch Strategy:**
+- Matched (10/batch): priority-based overflow grouping
+  1. Same company + same NOC (most similar) → full batches, overflow to next
+  2. Same NOC only (similar skills) → full batches, overflow to next
+  3. Remaining (mixed)
+- Unmatched (5/batch):
+  1. Same company (similar JD style) → full batches, overflow to next
+  2. Remaining (mixed)
+- Shows batch count + rows consumed + overflow at each priority
+- Session estimation: e.g. "at 800 batches/session → ~27 sessions, ~64h"
+
+**Input:** `step2_normalized.parquet`
 """)
     def step2_review_step3_prep(**context):
         """Review Step 2 results + scale workers + grouping preview for Step 3."""
@@ -445,52 +513,65 @@ with DAG(
             print(f"  Max sessions: {params['max_sessions']}")
 
         # --- Step 3 Prep: Grouping preview ---
+        # Same logic as step3_enrich_spark.py _create_batches_*()
+        # Priority-based overflow: full batches only at each priority, partial → next
+        from itertools import groupby as _groupby
+
         BATCH_MATCHED = 10
         BATCH_UNMATCHED = 5
 
-        def _simulate(df_in, group_cols_list, batch_size):
-            remaining = df_in.copy()
+        def _count_batches(rows_list, group_keys_list, batch_size):
+            """Count batches using same priority-overflow logic as Spark job."""
             stats = []
-            for name, cols in group_cols_list:
-                full_batches, full_rows = 0, 0
-                next_rem = []
-                for _, grp in remaining.groupby(cols):
-                    fb = len(grp) // batch_size
-                    full_batches += fb
-                    full_rows += fb * batch_size
-                    left = len(grp) % batch_size
-                    if left > 0:
-                        next_rem.append(grp.tail(left))
-                rem_df = pd.concat(next_rem) if next_rem else pd.DataFrame()
-                stats.append((name, full_batches, full_rows, len(rem_df)))
-                remaining = rem_df
-            rem_b = (len(remaining) + batch_size - 1) // batch_size if len(remaining) > 0 else 0
-            stats.append(("remaining", rem_b, len(remaining), 0))
+            remaining = list(rows_list)
+
+            for name, key_fn in group_keys_list:
+                remaining.sort(key=key_fn)
+                next_remaining = []
+                full_count = 0
+                full_rows = 0
+                for _, group in _groupby(remaining, key=key_fn):
+                    group_rows = list(group)
+                    for i in range(0, len(group_rows), batch_size):
+                        chunk = group_rows[i:i + batch_size]
+                        if len(chunk) == batch_size:
+                            full_count += 1
+                            full_rows += batch_size
+                        else:
+                            next_remaining.extend(chunk)
+                stats.append((name, full_count, full_rows, len(next_remaining)))
+                remaining = next_remaining
+
+            # Remaining: all partial batches including last partial
+            rem_count = (len(remaining) + batch_size - 1) // batch_size if remaining else 0
+            stats.append(("Remaining (mixed)", rem_count, len(remaining), 0))
             return stats
 
         m_calls, u_calls = 0, 0
 
         if len(matched) > 0:
-            m_stats = _simulate(matched, [
-                ("Group by company + NOC", ["company_name", "noc_id"]),
-                ("Group by NOC only", ["noc_id"]),
+            m_rows = matched.to_dict("records")
+            m_stats = _count_batches(m_rows, [
+                ("Group by company + NOC", lambda r: (r.get("company_name") or "", r.get("noc_id") or 0)),
+                ("Group by NOC only", lambda r: r.get("noc_id") or 0),
             ], BATCH_MATCHED)
             print(f"\n[SD:STEP3:GROUPING] === Matched: {len(matched):,} rows → {BATCH_MATCHED}/batch ===")
             for i, (name, batches, rows, rem) in enumerate(m_stats, 1):
                 m_calls += batches
-                remaining = f", {rem:,} remaining" if rem > 0 else ""
-                print(f"  Step {i}) {name:<25} → {batches:>6,} batches ({rows:>6,} rows consumed{remaining})")
+                rem_str = f", {rem:,} remaining" if rem > 0 else ""
+                print(f"  Step {i}) {name:<25} → {batches:>6,} batches ({rows:>6,} rows consumed{rem_str})")
             print(f"  Total: {m_calls:,} LLM calls")
 
         if len(unmatched) > 0:
-            u_stats = _simulate(unmatched, [
-                ("Group by company", ["company_name"]),
+            u_rows = unmatched.to_dict("records")
+            u_stats = _count_batches(u_rows, [
+                ("Group by company", lambda r: r.get("company_name") or ""),
             ], BATCH_UNMATCHED)
             print(f"\n[SD:STEP3:GROUPING] === Unmatched: {len(unmatched):,} rows → {BATCH_UNMATCHED}/batch ===")
             for i, (name, batches, rows, rem) in enumerate(u_stats, 1):
                 u_calls += batches
-                remaining = f", {rem:,} remaining" if rem > 0 else ""
-                print(f"  Step {i}) {name:<25} → {batches:>6,} batches ({rows:>6,} rows consumed{remaining})")
+                rem_str = f", {rem:,} remaining" if rem > 0 else ""
+                print(f"  Step {i}) {name:<25} → {batches:>6,} batches ({rows:>6,} rows consumed{rem_str})")
             print(f"  Total: {u_calls:,} LLM calls")
 
         total_calls = m_calls + u_calls
@@ -511,7 +592,39 @@ with DAG(
     # Step 3 — LLM Enrich: NOC + Seniority + Skills
     # =========================================================================
 
-    @task(task_id="sd_step3", task_display_name="Step 3: LLM Enrich")
+    @task(task_id="sd_step3", task_display_name="Step 3: LLM Enrich", doc_md="""
+### Step 3: LLM Enrich (Spark + Claude Haiku)
+Spark job via Livy: LLM enrichment for NOC, seniority, and skills.
+
+**Architecture — Driver Batch Factory:**
+- Driver creates all batches upfront with content-based batch_id (MD5 hash of sorted job_ids)
+- Batches distributed to Workers via `mapPartitionsWithIndex`
+- Workers only execute LLM calls + checkpoint — no grouping logic
+
+**Two Prompt Types:**
+- Unmatched (5/batch): NOC 510 list + JD → NOC + seniority + skills
+- Matched (10/batch): JD only → seniority + skills
+
+**Adaptive Grouping (Driver-side) — priority-based overflow:**
+- Matched (10/batch):
+  1. Same company + same NOC → most similar JDs (same role at same company)
+  2. Same NOC, different companies → similar skill requirements
+  3. Remaining → mixed batch (partial groups from above)
+- Unmatched (5/batch):
+  1. Same company → similar JD writing style, company context helps NOC selection
+  2. Remaining → mixed batch
+- Each priority: full batches only, partial groups overflow to next priority
+
+**Session Control (Driver-level):**
+- `max_batches_per_session`: exact N batches per `collect()`
+- Cooldown between sessions (configurable)
+- `max_sessions`: stop after N sessions, resume on next trigger
+
+**Checkpoint:** Content-based batch_id = same rows always = same filename.
+Worker-count independent. 2-level resume: Driver `done_job_ids` + Worker `check_checkpoint`.
+
+**Output:** `step3_enriched.parquet` + checkpoints for resume
+""")
     def step3_enrich(**context):
         """Step 3: LLM enrich — NOC + seniority + skills (Spark/Livy)."""
         import time
@@ -622,7 +735,24 @@ with DAG(
     # Step 3 Review + Step 4 Prep
     # =========================================================================
 
-    @task(task_id="sd_bridge_34", task_display_name="Step 3→4 Bridge")
+    @task(task_id="sd_bridge_34", task_display_name="Step 3→4 Bridge", doc_md="""
+### Step 3→4 Bridge
+Review Step 3 output + validate before DB load.
+
+**1. Step 3 Review:**
+- Total rows, NOC completion rate, NOC by method (ST vs LLM)
+- Seniority: valid, null, invalid counts
+- Skills: count with skills, avg per posting
+
+**2. Job ID Uniqueness Check:**
+- Verify all job_ids are unique in enriched parquet
+- If duplicates found → **fail task, block Step 4** (prevent corrupt DB load)
+
+**3. Quality Filter Stats:**
+- Missing NOC / skills / seniority counts
+- Excluded row count and percentage
+- Preview of DB load row count
+""")
     def step3_review_step4_prep():
         """Review Step 3 results + prepare for DB load."""
         import pandas as pd
@@ -674,7 +804,30 @@ with DAG(
     # Step 4 — DB Load
     # =========================================================================
 
-    @task(task_id="sd_step4", task_display_name="Step 4: DB Load")
+    @task(task_id="sd_step4", task_display_name="Step 4: DB Load", doc_md="""
+### Step 4: Transform + Load (Star Schema)
+Skill normalization + quality filter + full rebuild DB load.
+
+**1. Quality Filter:**
+- Drop rows missing NOC, skills, or seniority
+- Same criteria as bridge_34 review
+
+**2. Skill Normalization:**
+- `inflect` plural→singular (e.g. "configurations" → "configuration")
+- `KEEP_PLURAL` for business terms (sales, operations, logistics, analytics...)
+- Category majority vote: same skill with multiple categories → most frequent wins
+- Before/after stats + examples logged
+
+**3. Star Schema Load (full rebuild):**
+- Drop all star schema tables (preserves noc_titles)
+- Recreate from schema.sql
+- COPY bulk insert (io.StringIO + csv.writer + copy_from)
+- Order: dim_seniority → dim_companies → dim_skills → fact_job_postings → fact_job_skill_demand
+
+**4. DB Verification:**
+- Row counts for all dim + fact tables
+- Category breakdown from dim_skills
+""")
     def step4_load():
         """Load enriched data into skill-demand PostgreSQL (Star Schema). Full rebuild each run."""
         import pandas as pd
@@ -775,7 +928,25 @@ with DAG(
     # Step 4 Review + Final Summary
     # =========================================================================
 
-    @task(task_id="sd_final", task_display_name="Pipeline Complete: Final Summary")
+    @task(task_id="sd_final", task_display_name="Pipeline Complete: Final Summary", doc_md="""
+### Pipeline Complete: Final Summary
+End-to-end pipeline completion report.
+
+**Coverage:**
+- Total dataset vs processed vs quality-filtered vs DB-loaded
+- Quality filter breakdown: missing NOC / skills / seniority
+- NOC category coverage (out of 510)
+
+**Star Schema Stats:**
+- dim_companies, dim_skills, fact_job_postings, fact_job_skill_demand counts
+- Skill category breakdown (hard_skill, soft_skill, tool, certification)
+- Seniority distribution
+- Avg skills per posting
+
+**Analysis:**
+- Top 10 most demanded skills (from fact × dim JOIN)
+- Sample 10 random postings with company, title, seniority, top skills
+""")
     def step4_review_final_summary():
         """Review DB load results + final pipeline summary (Star Schema)."""
         import psycopg2
@@ -903,6 +1074,7 @@ with DAG(
         stop_spark_workers = BashOperator(
             task_id="sd_stop_workers",
             task_display_name="Stop Spark Workers",
+            doc_md="Release Spark workers after all Spark jobs complete. Master + Livy stay up for Airflow polling. Trigger: all_done (runs even if upstream failed).",
             bash_command=f"cd {INFRA_DIR} && bash down.sh spark-sd-workers 2>&1",
             trigger_rule="all_done",
         )
@@ -917,6 +1089,7 @@ with DAG(
         stop_spark_cluster = BashOperator(
             task_id="sd_stop_spark",
             task_display_name="Stop Spark Cluster",
+            doc_md="Shut down Spark Master + Livy. Final cleanup — all Spark resources released. Trigger: all_done.",
             bash_command=f"cd {INFRA_DIR} && bash down.sh spark-sd-cluster 2>&1",
             trigger_rule="all_done",
         )
