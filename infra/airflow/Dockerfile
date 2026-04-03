@@ -3,7 +3,7 @@
 # -----------------------------------------------------------------------------
 # Purpose : Custom Airflow image with Python packages and Docker CLI
 # Base    : apache/airflow:2.10.5-python3.12 (CeleryExecutor-ready)
-# Added   : Docker Compose CLI, Livy provider, pandas, psycopg2, pyarrow, requests
+# Added   : Docker Compose CLI, Livy provider, pandas, psycopg2, pyarrow, requests, inflect
 #
 # Used by : airflow-webserver, airflow-scheduler, airflow-worker, airflow-init
 #           in docker-compose.airflow.yml
@@ -40,11 +40,15 @@ USER airflow
 #    accidentally downgrading or removing Airflow during dependency resolution.
 #    See: https://github.com/apache/airflow/discussions/53623
 #
-#    - apache-airflow-providers-apache-livy : LivyOperator for Spark job submission
-#    - pandas         : DataFrame operations in market-trend DAG tasks
+#    - apache-airflow-providers-apache-livy : LivyHook for Spark job submission
+#    - pandas         : DataFrame operations in DAG tasks
 #    - psycopg2-binary: PostgreSQL connection for DAG tasks (load stage)
-#    - pyarrow        : Parquet I/O between transform and load stages
+#    - pyarrow        : Parquet I/O between pipeline stages
 #    - requests       : HTTP client for API calls in DAG tasks
+#    - inflect        : Skill normalization — plural→singular (Step 4 load)
+#                       Pinned inflect==7.0.0 + typeguard==4.1.0 — latest inflect
+#                       pulls typeguard 4.5+ which requires typing_extensions.NoExtraItems
+#                       not available in Airflow's typing_extensions 4.15.0
 # -----------------------------------------------------------------------------
 ARG AIRFLOW_VERSION=2.10.5
 RUN pip install --no-cache-dir \
@@ -52,5 +56,7 @@ RUN pip install --no-cache-dir \
     apache-airflow-providers-apache-livy \
     pandas \
     psycopg2-binary \
-    pyarrow \
-    requests
+    "pyarrow>=23.0" \
+    requests \
+    "inflect==7.0.0" \
+    "typeguard==4.1.0"

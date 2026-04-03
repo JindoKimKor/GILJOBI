@@ -7,8 +7,8 @@
 #
 # Usage:
 #   ./down.sh                    # Stop all running modules
-#   ./down.sh spark              # Stop Spark only
-#   ./down.sh airflow spark      # Stop Airflow + Spark
+#   ./down.sh spark-sd           # Stop Spark (skill-demand) only
+#   ./down.sh airflow spark-sd   # Stop Airflow + Spark
 #   ./down.sh -v                 # Stop all + remove volumes (full reset)
 #   ./down.sh postgres -v        # Stop PostgreSQL + delete data volume
 # =============================================================================
@@ -25,19 +25,22 @@ EXTRA_ARGS=""
 
 for arg in "$@"; do
     case "$arg" in
-        postgres) MODULES="$MODULES postgres" ;;
-        airflow)  MODULES="$MODULES airflow" ;;
-        spark)    MODULES="$MODULES spark" ;;
+        postgres)          MODULES="$MODULES postgres" ;;
+        postgres-sd)       MODULES="$MODULES postgres-sd" ;;
+        airflow)           MODULES="$MODULES airflow" ;;
+        spark-sd)          MODULES="$MODULES spark-sd" ;;
+        spark-sd-cluster)  MODULES="$MODULES spark-sd-cluster" ;;
+        spark-sd-workers)  MODULES="$MODULES spark-sd-workers" ;;
         -v|--volumes) EXTRA_ARGS="$EXTRA_ARGS -v" ;;
         -h|--help)
             echo "Usage: ./down.sh [modules...] [-v]"
             echo ""
-            echo "Modules: postgres, airflow, spark"
+            echo "Modules: postgres, postgres-sd, airflow, spark-sd, spark-sd-cluster, spark-sd-workers"
             echo "  -v    Remove volumes (full reset, deletes data)"
             echo ""
             echo "Examples:"
             echo "  ./down.sh                    # Stop all"
-            echo "  ./down.sh spark              # Stop Spark only"
+            echo "  ./down.sh spark-sd           # Stop Spark (skill-demand) only"
             echo "  ./down.sh -v                 # Stop all + delete volumes"
             exit 0
             ;;
@@ -50,7 +53,7 @@ done
 
 # If no modules specified, stop all
 if [ -z "$MODULES" ]; then
-    MODULES="postgres airflow spark"
+    MODULES="postgres postgres-sd airflow spark-sd-workers spark-sd-cluster"
     echo "Stopping all modules..."
 else
     echo "Stopping: $MODULES"
@@ -69,11 +72,20 @@ for MODULE in $MODULES; do
         postgres)
             docker compose -p market-trend-db -f docker-compose.postgres.yml down $EXTRA_ARGS 2>&1 || true
             ;;
+        postgres-sd)
+            docker compose -p skill-demand-db -f docker-compose.postgres-sd.yml down $EXTRA_ARGS 2>&1 || true
+            ;;
         airflow)
             docker compose -p giljobi-airflow -f docker-compose.airflow.yml down $EXTRA_ARGS 2>&1 || true
             ;;
-        spark)
-            docker compose -p giljobi-spark -f docker-compose.spark.yml down $EXTRA_ARGS 2>&1 || true
+        spark-sd)
+            docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml down $EXTRA_ARGS 2>&1 || true
+            ;;
+        spark-sd-workers)
+            docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml stop spark-worker-sd 2>&1 || true
+            ;;
+        spark-sd-cluster)
+            docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml down $EXTRA_ARGS 2>&1 || true
             ;;
     esac
 done

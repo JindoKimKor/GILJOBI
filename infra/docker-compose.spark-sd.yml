@@ -1,0 +1,88 @@
+# =============================================================================
+# docker-compose.spark-sd.yml
+# -----------------------------------------------------------------------------
+# Purpose : Spark cluster for skill-demand pipeline
+# Module  : spark-sd
+#
+# Usage:
+#   ./up.sh spark-sd               # All (master + workers + livy)
+#   ./up.sh spark-sd-cluster       # Master + Livy only
+#   ./up.sh spark-sd-workers       # Workers only
+#
+# Spark cluster for skill-demand pipeline:
+#   - Worker image includes sentence-transformers, numpy, psycopg2
+#   - Mounts skill-demand pipelines + data
+#   - Project name: giljobi-spark-sd (Docker Desktop grouping)
+#
+# Volume paths use ${INFRA_HOST_PATH} for Docker-in-Docker compatibility.
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Spark Master
+  # ---------------------------------------------------------------------------
+  spark-master-sd:
+    image: apache/spark:3.5.1
+    container_name: spark-master-sd
+    hostname: spark-master-sd
+    ports:
+      - "8081:8080"
+      - "7078:7077"
+    volumes:
+      - ${INFRA_HOST_PATH:-.}/../data:/opt/spark/data
+      - ${INFRA_HOST_PATH:-.}/../pipelines/skill-demand:/opt/spark/pipelines/skill-demand
+      - ${INFRA_HOST_PATH:-.}/jars:/opt/spark/jars/custom
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    command:
+      ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+
+  # ---------------------------------------------------------------------------
+  # Spark Worker (skill-demand — with sentence-transformers)
+  # ---------------------------------------------------------------------------
+  spark-worker-sd:
+    build: ./spark-worker-sd
+    user: root
+    depends_on:
+      - spark-master-sd
+    volumes:
+      - ${INFRA_HOST_PATH:-.}/../data:/opt/spark/data
+      - ${INFRA_HOST_PATH:-.}/../pipelines/skill-demand:/opt/spark/pipelines/skill-demand
+      - ${INFRA_HOST_PATH:-.}/jars:/opt/spark/jars/custom
+      - C:/Users/blitz/.claude:/tmp/.claude
+    environment:
+      - SPARK_MASTER=spark://spark-master-sd:7077
+      - SPARK_WORKER_CORES=${SPARK_SD_WORKER_CORES:-1}
+      - SPARK_WORKER_MEMORY=${SPARK_SD_WORKER_MEMORY:-2g}
+      - SPARK_NO_DAEMONIZE=true
+      - PYSPARK_PYTHON=python3.11
+    deploy:
+      replicas: ${SPARK_SD_WORKER_REPLICAS:-8}
+    command:
+      [
+        "/opt/spark/bin/spark-class",
+        "org.apache.spark.deploy.worker.Worker",
+        "spark://spark-master-sd:7077",
+      ]
+
+  # ---------------------------------------------------------------------------
+  # Apache Livy (skill-demand)
+  # ---------------------------------------------------------------------------
+  livy-sd:
+    build: ./livy-sd
+    container_name: livy-sd
+    ports:
+      - "8999:8998"
+    environment:
+      - SPARK_HOME=/opt/spark
+    volumes:
+      - ${INFRA_HOST_PATH:-.}/../pipelines/skill-demand:/opt/spark/pipelines/skill-demand
+      - ${INFRA_HOST_PATH:-.}/../data:/opt/spark/data
+    depends_on:
+      - spark-master-sd
+
+networks:
+  default:
+    name: giljobi-network
+    external: true
