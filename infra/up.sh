@@ -6,9 +6,10 @@
 # is read from .env, which is symlinked from config/.env.{environment}.
 #
 # Modules:
-#   postgres  — Pipeline data DB (local development)
-#   airflow   — Airflow + Redis + Airflow-DB (orchestration)
-#   spark     — Spark + Livy (distributed processing)
+#   postgres     — Pipeline data DB (market-trend)
+#   postgres-sd  — Skill-demand DB (separate)
+#   airflow      — Airflow + Redis + Airflow-DB (orchestration)
+#   spark-sd     — Spark + Livy (skill-demand)
 #
 # Options:
 #   --build      Rebuild Docker images before starting
@@ -17,7 +18,7 @@
 # Usage:
 #   ./up.sh airflow                    # Orchestration only (DAGs manage infra)
 #   ./up.sh postgres                   # Pipeline DB only (manual py main.py)
-#   ./up.sh airflow spark              # Orchestration + distributed processing
+#   ./up.sh airflow spark-sd           # Orchestration + distributed processing
 #   ./up.sh airflow --build            # Rebuild changed images
 #   ./up.sh airflow --no-cache         # Full rebuild from scratch
 #
@@ -62,9 +63,12 @@ show_usage() {
     echo "Usage: ./up.sh <modules...> [--build|--no-cache]"
     echo ""
     echo "Modules:"
-    echo "  postgres    Pipeline data DB"
-    echo "  airflow     Airflow + Redis + metadata DB"
-    echo "  spark       Spark + Livy"
+    echo "  postgres        Pipeline data DB (market-trend)"
+    echo "  postgres-sd     Skill-demand DB (separate)"
+    echo "  airflow         Airflow + Redis + metadata DB"
+    echo "  spark-sd           Spark cluster for skill-demand (all)"
+    echo "  spark-sd-cluster   Spark Master + Livy only (skill-demand)"
+    echo "  spark-sd-workers   Spark Workers only (skill-demand)"
     echo ""
     echo "Options:"
     echo "  --build      Rebuild images (use cached layers)"
@@ -77,7 +81,7 @@ show_usage() {
     echo "Examples:"
     echo "  ./up.sh airflow                # Start Airflow (DAGs manage rest)"
     echo "  ./up.sh postgres airflow       # DB + Airflow"
-    echo "  ./up.sh airflow spark          # Airflow + Spark"
+    echo "  ./up.sh airflow spark-sd       # Airflow + Spark (skill-demand)"
     echo "  ./up.sh airflow --no-cache     # Rebuild from scratch"
     exit 1
 }
@@ -88,7 +92,7 @@ fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        postgres|airflow|spark)
+        postgres|postgres-sd|airflow|spark-sd|spark-sd-cluster|spark-sd-workers)
             MODULES="$MODULES $1"
             shift
             ;;
@@ -148,9 +152,11 @@ if [ "$NO_CACHE" = "true" ]; then
     echo "Building images (no cache)..."
     for MODULE in $MODULES; do
         case "$MODULE" in
-            postgres) docker compose -p market-trend-db -f docker-compose.postgres.yml build --no-cache ;;
-            airflow)  docker compose -p giljobi-airflow -f docker-compose.airflow.yml build --no-cache ;;
-            spark)    docker compose -p giljobi-spark -f docker-compose.spark.yml build --no-cache ;;
+            postgres)       docker compose -p market-trend-db -f docker-compose.postgres.yml build --no-cache ;;
+            postgres-sd)    docker compose -p skill-demand-db -f docker-compose.postgres-sd.yml build --no-cache ;;
+            airflow)        docker compose -p giljobi-airflow -f docker-compose.airflow.yml build --no-cache ;;
+            spark-sd|spark-sd-cluster|spark-sd-workers)
+                            docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml build --no-cache ;;
         esac
     done
 fi
@@ -160,8 +166,11 @@ fi
 # -----------------------------------------------------------------------------
 # Start each module with its own project name for Docker Desktop grouping:
 #   📁 giljobi-airflow       (airflow-db, redis, webserver, scheduler, worker)
-#   📁 market-trend-db   (postgres)
-#   📁 giljobi-spark         (spark-master, spark-worker, livy)
+#   📁 market-trend-db       (postgres — market-trend)
+#   📁 skill-demand-db       (postgres — skill-demand)
+#   📁 giljobi-spark-sd      (spark-master-sd, spark-worker-sd, livy-sd)
+#       spark-sd-cluster = master + livy only
+#       spark-sd-workers = workers only (requires spark-sd-cluster)
 # =============================================================================
 
 echo "=== Giljobi Infrastructure ==="
@@ -171,8 +180,11 @@ echo "=============================="
 
 for MODULE in $MODULES; do
     case "$MODULE" in
-        postgres) docker compose -p market-trend-db -f docker-compose.postgres.yml up -d --wait $BUILD_FLAG ;;
-        airflow)  docker compose -p giljobi-airflow -f docker-compose.airflow.yml up -d --wait $BUILD_FLAG ;;
-        spark)    docker compose -p giljobi-spark -f docker-compose.spark.yml up -d --wait $BUILD_FLAG ;;
+        postgres)       docker compose -p market-trend-db -f docker-compose.postgres.yml up -d --wait $BUILD_FLAG ;;
+        postgres-sd)    docker compose -p skill-demand-db -f docker-compose.postgres-sd.yml up -d --wait $BUILD_FLAG ;;
+        airflow)        docker compose -p giljobi-airflow -f docker-compose.airflow.yml up -d --wait $BUILD_FLAG ;;
+        spark-sd)          docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml up -d --wait $BUILD_FLAG ;;
+        spark-sd-cluster)  docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml up -d spark-master-sd livy-sd --wait $BUILD_FLAG ;;
+        spark-sd-workers)  docker compose -p giljobi-spark-sd -f docker-compose.spark-sd.yml up -d spark-worker-sd $BUILD_FLAG ;;
     esac
 done

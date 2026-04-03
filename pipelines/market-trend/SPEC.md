@@ -13,7 +13,7 @@
 | Historical Range | Jan 2023 ~ Feb 2026 (~38 files) |
 | Rows per Month | ~44,000 |
 | Total Estimated Rows | ~3,300,000 |
-| Processing Engine | pandas (no Spark required) |
+| Processing Engine | PySpark (Spark cluster via Airflow) |
 | Open Data Portal | https://open.canada.ca/data/en/dataset/ea639e28-c0fc-48bf-b5dd-b8899bd43072 |
 
 ## Data Acquisition
@@ -136,24 +136,24 @@ flowchart LR
 
 ### Execution Modes: CLI vs Airflow
 
-The same pipeline code runs in two modes with different data passing strategies:
+Two execution modes produce the same output. CLI uses pandas for local testing without infrastructure. Airflow uses PySpark for distributed processing in production.
 
 ```mermaid
 flowchart LR
-    subgraph cli ["CLI Mode — py main.py"]
+    subgraph cli ["CLI Mode — py main.py (pandas, local test)"]
         direction LR
         C_SCRAPE["scrape"] --> C_DL["download<br/>→ CSV files"]
         C_DL --> C_VAL["validate"]
-        C_VAL --> C_TX["transform<br/>━━━━━━━━━━━<br/>Returns DataFrame<br/>in memory"]
+        C_VAL --> C_TX["transform<br/>━━━━━━━━━━━<br/>pandas DataFrame<br/>in memory"]
         C_TX -->|"DataFrame<br/>(in memory)"| C_LOAD["load<br/>━━━━━━━━━━━<br/>COPY from<br/>DataFrame directly"]
     end
 
-    subgraph airflow ["Airflow Mode — DAG"]
+    subgraph airflow ["Airflow Mode — DAG (PySpark, production)"]
         direction LR
         A_SCRAPE["scrape"] --> A_DL["download<br/>→ CSV files"]
         A_DL --> A_VAL["validate"]
-        A_VAL --> A_TX["transform<br/>━━━━━━━━━━━<br/>Saves .parquet<br/>to disk"]
-        A_TX -->|"file paths<br/>(via XCom)"| A_LOAD["load<br/>━━━━━━━━━━━<br/>Reads .parquet<br/>then COPY"]
+        A_VAL --> A_TX["transform<br/>━━━━━━━━━━━<br/>PySpark + UDF<br/>Broadcast Join<br/>Schema Enforcement"]
+        A_TX -->|"partitioned<br/>.parquet"| A_LOAD["load<br/>━━━━━━━━━━━<br/>Spark JDBC write<br/>to PostgreSQL"]
     end
 
     style cli fill:#1B5E20,stroke:#4CAF50,color:#fff
@@ -166,11 +166,14 @@ flowchart LR
 
 | | CLI (`py main.py`) | Airflow (DAG) |
 |---|---|---|
-| **Data between stages** | In-memory DataFrame | `.parquet` files on disk |
-| **Why** | Single process — no serialization needed | Separate tasks — XCom can't pass DataFrames, only file paths |
-| **Intermediate files** | None | `data/processed/market-trend/*.parquet` |
-| **Infrastructure** | Manual: `./infra/up.sh postgres` | Automatic: `ensure_db` BashOperator |
-| **Pipeline code** | `pipelines/market-trend/src/` | Same code, imported by `dags/market_trend_dag.py` |
+| **Purpose** | Local testing, no infra needed | Production, distributed processing |
+| **Processing engine** | pandas (single process) | PySpark (Spark cluster) |
+| **Data between stages** | In-memory DataFrame | Partitioned `.parquet` on disk |
+| **NOC mapping** | dict lookup | Broadcast Join |
+| **Salary normalization** | pandas apply | Spark UDF |
+| **Metrics** | print statements | Spark Accumulator |
+| **Infrastructure** | Manual: `./infra/up.sh postgres` | Automatic: `ensure_db` + `ensure_spark` |
+| **Output** | Same `job_postings` table | Same `job_postings` table |
 
 ### Schedule & Config
 
@@ -195,7 +198,11 @@ flowchart LR
 | Redis (Celery broker) | `docker-compose.airflow.yml` | Included with Airflow |
 | Pipeline DB (port 5432) | `docker-compose.postgres.yml` | Automatic: DAG `ensure_db` task |
 
-Spark is **not used** by this stream. No `docker-compose.spark.yml` needed.
+Spark is used for the TRANSFORM and LOAD stages via LivyOperator.
+
+| Service | Compose File | How it starts |
+|---------|-------------|---------------|
+| Spark master + workers + Livy | `docker-compose.spark-sd.yml` | Automatic: DAG `ensure_spark` task (skill-demand only) |
 
 ### Configuration
 
@@ -246,6 +253,83 @@ Pipeline DB schema is defined in `infra/init/01-market-trend.sql`. PostgreSQL Do
 | `first_posting_date` | DATE | | `First Posting Date` | Direct |
 | `salary_min_hourly` | NUMERIC(6,2) | | `Salary Minimum` | Normalize to hourly |
 | `salary_max_hourly` | NUMERIC(6,2) | | `Salary Maximum` | Normalize to hourly |
+
+## Spark Features
+
+The TRANSFORM and LOAD stages run as a PySpark job submitted via LivyOperator from the Airflow DAG. The following Spark features are used:
+
+### Schema Enforcement (StructType)
+
+Define the expected CSV schema upfront. Rows that don't match the schema are rejected at read time — no silent data corruption.
+
+```python
+schema = StructType([
+    StructField("Job Title", StringType(), nullable=False),
+    StructField("NOC21 Code", StringType()),
+    StructField("Salary Minimum", DoubleType()),
+    StructField("Salary Maximum", DoubleType()),
+    StructField("Salary Per", StringType()),
+    ...
+])
+df = spark.read.csv(path, header=True, schema=schema)
+```
+
+### Broadcast Join (NOC Lookup)
+
+The `noc_titles` table (516 rows) is small enough to broadcast to all workers. This avoids expensive shuffle joins — each worker has a local copy of the lookup table.
+
+```python
+noc_df = spark.read.jdbc(db_url, "noc_titles")
+noc_broadcast = broadcast(noc_df)
+df = df.join(noc_broadcast, df["noc21_code"] == noc_broadcast["noc21_code"], "left")
+```
+
+### UDF (Salary Normalization)
+
+Custom salary-to-hourly conversion logic runs as a Spark UDF, distributed across all workers.
+
+```python
+@udf(returnType=DoubleType())
+def normalize_salary(value, salary_per):
+    divisors = {"Hour": 1, "Day": 8, "Week": 40, "Month": 173.33, "Year": 2080}
+    if salary_per not in divisors or value is None:
+        return None
+    return value / divisors[salary_per]
+```
+
+### Partitioned Parquet Write
+
+Output is written as parquet partitioned by year-month. Downstream queries benefit from partition pruning — only relevant partitions are read.
+
+```python
+df.write.partitionBy("year_month").parquet(output_path)
+```
+
+### Accumulator (Processing Metrics)
+
+Accumulators track pipeline metrics across distributed workers without collecting full DataFrames to the driver.
+
+```python
+outlier_count = spark.sparkContext.accumulator(0)
+null_salary_count = spark.sparkContext.accumulator(0)
+
+@udf(returnType=DoubleType())
+def filter_outlier(hourly_rate):
+    if hourly_rate is not None and (hourly_rate < 10 or hourly_rate > 500):
+        outlier_count.add(1)
+        return None
+    return hourly_rate
+```
+
+### Summary
+
+| Feature | Purpose | Why Not pandas |
+|---------|---------|----------------|
+| Schema Enforcement | Reject malformed rows at read | pandas reads everything, fails later |
+| Broadcast Join | NOC lookup without shuffle | pandas has no distributed join concept |
+| UDF | Distribute custom logic across workers | pandas runs on single core |
+| Partitioned Write | Query-time partition pruning | pandas writes single file |
+| Accumulator | Distributed metric collection | pandas uses simple counters (single process) |
 
 ## Transformation Rules
 
