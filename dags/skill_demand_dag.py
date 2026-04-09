@@ -52,6 +52,19 @@ SD_DB_CONN = os.environ.get(
     "SKILL_DEMAND_DB_CONN",
     "postgresql://postgres:postgres@skill-demand-db:5432/giljobi_sd"
 )
+# Optional secondary target — Neon cloud. Empty = skip (local-only behavior preserved).
+SD_DB_CONN_NEON = os.environ.get("SKILL_DEMAND_DB_CONN_NEON", "")
+
+
+def _sd_targets():
+    """Active DB load targets for NOC seed + Step 4 load.
+
+    Returns list of (label, conn_str). Neon included only if env var is set.
+    """
+    targets = [("local", SD_DB_CONN)]
+    if SD_DB_CONN_NEON:
+        targets.append(("neon", SD_DB_CONN_NEON))
+    return targets
 
 default_args = {
     "owner": "giljobi",
@@ -135,6 +148,20 @@ Fail-fast guard: checks required params before any infrastructure starts.
         for key, value in sorted(params.items()):
             print(f"  {key}: {value}")
 
+        # Log DB load targets (local + optional neon)
+        targets = _sd_targets()
+        print(f"\n[SD:PARAMS] === DB Load Targets ({len(targets)}) ===")
+        for label, conn_str in targets:
+            # Mask password in log
+            safe = conn_str
+            if "://" in conn_str and "@" in conn_str:
+                scheme, rest = conn_str.split("://", 1)
+                if ":" in rest.split("@")[0]:
+                    user = rest.split(":")[0]
+                    host = rest.split("@", 1)[1]
+                    safe = f"{scheme}://{user}:***@{host}"
+            print(f"  [{label}] {safe}")
+
     # =========================================================================
     # Infrastructure — Ensure DB
     # =========================================================================
@@ -152,6 +179,48 @@ Fail-fast guard: checks required params before any infrastructure starts.
         )
     else:
         ensure_db = EmptyOperator(task_id="sd_ensure_db", task_display_name="Ensure DB")
+
+    # =========================================================================
+    # Ping DB Targets — smoke test before any heavy work
+    # =========================================================================
+
+    @task(task_id="sd_ping_targets", task_display_name="Ping DB Targets", doc_md="""
+### Ping DB Targets
+Smoke test all configured DB load targets (local + optional Neon).
+Fails fast if any target is unreachable — avoids wasting Step 4 work.
+
+- Connects to each target with psycopg2
+- Runs `SELECT 1` to verify network + auth
+- Logs target label + masked connection string
+""")
+    def ping_targets():
+        """Smoke test all DB targets to fail fast on connection errors."""
+        import psycopg2
+
+        targets = _sd_targets()
+        print(f"[SD:INFRA] Testing {len(targets)} DB target(s)...")
+        for label, conn_str in targets:
+            # Mask password in log
+            safe = conn_str
+            if "://" in conn_str and "@" in conn_str:
+                scheme, rest = conn_str.split("://", 1)
+                if ":" in rest.split("@")[0]:
+                    user = rest.split(":")[0]
+                    host = rest.split("@", 1)[1]
+                    safe = f"{scheme}://{user}:***@{host}"
+            try:
+                conn = psycopg2.connect(conn_str, connect_timeout=10)
+                cur = conn.cursor()
+                cur.execute("SELECT version()")
+                version = cur.fetchone()[0]
+                cur.close()
+                conn.close()
+                print(f"  [{label}] OK — {safe}")
+                print(f"    version: {version[:80]}")
+            except Exception as e:
+                print(f"  [{label}] FAIL — {safe}")
+                print(f"    error: {e}")
+                raise
 
     # =========================================================================
     # Infrastructure — Spark Cluster (Master + Livy only)
@@ -184,7 +253,7 @@ Download and load Canadian NOC 2021 occupation codes into `noc_titles` table.
 - Depends on: Ensure DB (needs PostgreSQL running)
 """)
     def noc_setup():
-        """Download NOC 2021 master CSV and load into skill-demand DB."""
+        """Download NOC 2021 master CSV and load into all skill-demand DB targets."""
         import pandas as pd
         import psycopg2
 
@@ -193,29 +262,7 @@ Download and load Canadian NOC 2021 occupation codes into `noc_titles` table.
             "indexV1/noc-2021-v1.0-classification-structure.csv"
         )
 
-        conn = psycopg2.connect(SD_DB_CONN)
-        conn.autocommit = True
-        cur = conn.cursor()
-
-        # Create table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS noc_titles (
-                id SERIAL PRIMARY KEY,
-                noc21_code VARCHAR(10) UNIQUE NOT NULL,
-                noc21_name VARCHAR(200)
-            )
-        """)
-
-        # Check if already populated
-        cur.execute("SELECT COUNT(*) FROM noc_titles")
-        count = cur.fetchone()[0]
-        if count > 0:
-            print(f"[SD:INFRA] Already populated: {count} titles. Skipping.")
-            cur.close()
-            conn.close()
-            return
-
-        # Download and filter to Level 5 (Unit Group)
+        # Download and filter to Level 5 (Unit Group) — once, shared across targets
         df = pd.read_csv(NOC_URL)
         unit_groups = df[df["Level"] == 5].reset_index(drop=True)
         noc = unit_groups[["Code - NOC 2021 V1.0", "Class title"]].copy()
@@ -225,16 +272,40 @@ Download and load Canadian NOC 2021 occupation codes into `noc_titles` table.
         })
         noc = noc.dropna(subset=["noc21_code"])
 
-        # Insert
-        for _, row in noc.iterrows():
-            cur.execute(
-                "INSERT INTO noc_titles (noc21_code, noc21_name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (str(row["noc21_code"]), row["noc21_name"]),
-            )
+        # Load into each target DB
+        for label, conn_str in _sd_targets():
+            conn = psycopg2.connect(conn_str)
+            conn.autocommit = True
+            cur = conn.cursor()
 
-        cur.close()
-        conn.close()
-        print(f"[SD:INFRA] Loaded {len(noc)} unit group titles into skill-demand DB.")
+            # Create table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS noc_titles (
+                    id SERIAL PRIMARY KEY,
+                    noc21_code VARCHAR(10) UNIQUE NOT NULL,
+                    noc21_name VARCHAR(200)
+                )
+            """)
+
+            # Check if already populated
+            cur.execute("SELECT COUNT(*) FROM noc_titles")
+            count = cur.fetchone()[0]
+            if count > 0:
+                print(f"[SD:INFRA] {label}: already populated ({count} titles). Skipping.")
+                cur.close()
+                conn.close()
+                continue
+
+            # Insert
+            for _, row in noc.iterrows():
+                cur.execute(
+                    "INSERT INTO noc_titles (noc21_code, noc21_name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (str(row["noc21_code"]), row["noc21_name"]),
+                )
+
+            cur.close()
+            conn.close()
+            print(f"[SD:INFRA] {label}: loaded {len(noc)} unit group titles.")
 
     # =========================================================================
     # Download — Kaggle Dataset
@@ -794,10 +865,21 @@ Review Step 3 output + validate before DB load.
         print(f"  Excluded: {excluded:,} ({excluded/total*100:.1f}%)")
         print(f"  DB load:  {int(complete.sum()):,} rows")
 
+        targets = _sd_targets()
         print(f"\n[SD:STEP4:PREP]")
-        print(f"  DB: {SD_DB_CONN}")
+        print(f"  DB targets: {len(targets)} ({', '.join(label for label, _ in targets)})")
+        for label, conn_str in targets:
+            # Mask password in log
+            safe = conn_str
+            if "://" in conn_str and "@" in conn_str:
+                scheme, rest = conn_str.split("://", 1)
+                if ":" in rest.split("@")[0]:
+                    user = rest.split(":")[0]
+                    host = rest.split("@", 1)[1]
+                    safe = f"{scheme}://{user}:***@{host}"
+            print(f"    [{label}] {safe}")
         print(f"  Schema: {PIPELINE_DIR}/schema.sql")
-        print(f"  DB load: {int(complete.sum()):,} rows (incomplete excluded)")
+        print(f"  DB load: {int(complete.sum()):,} rows per target (incomplete excluded)")
         return stats
 
     # =========================================================================
@@ -870,59 +952,65 @@ Skill normalization + quality filter + full rebuild DB load.
                 print(f"     e.g. '{name}': {breakdown} → {winner}")
         print(f"  After:  {len(skill_rows):,} entries, {len(dim_skills_dict):,} unique names")
 
-        conn = psycopg2.connect(SD_DB_CONN)
-        conn.autocommit = True
+        # Precompute companies list (shared across targets)
+        companies = df["company_name"].dropna().unique().tolist()
+        schema_sql = open(f"{PIPELINE_DIR}/schema.sql").read()
 
-        try:
-            # 3. Drop + recreate schema (full rebuild — data warehouse pattern)
-            drop_star_schema(conn)
-            cur = conn.cursor()
-            print(f"[SD:STEP4] Schema: drop + recreate from {PIPELINE_DIR}/schema.sql...")
-            cur.execute(open(f"{PIPELINE_DIR}/schema.sql").read())
-            cur.close()
-            print(f"[SD:STEP4] Schema ready.")
+        # 3. Load into each target (local + neon if configured)
+        for label, conn_str in _sd_targets():
+            print(f"\n[SD:STEP4] ========== Loading into {label.upper()} ==========")
+            conn = psycopg2.connect(conn_str)
+            conn.autocommit = True
 
-            # 4. Load dimensions
-            seniority_map = load_dim_seniority(conn)
-            print(f"[SD:STEP4] dim_seniority: {len(seniority_map)} levels")
+            try:
+                # Drop + recreate schema (full rebuild — data warehouse pattern)
+                drop_star_schema(conn)
+                cur = conn.cursor()
+                print(f"[SD:STEP4] {label}: Schema drop + recreate from {PIPELINE_DIR}/schema.sql...")
+                cur.execute(schema_sql)
+                cur.close()
+                print(f"[SD:STEP4] {label}: Schema ready.")
 
-            companies = df["company_name"].dropna().unique().tolist()
-            company_map = load_dim_companies(companies, conn)
-            print(f"[SD:STEP4] dim_companies: {len(company_map):,} companies")
+                # Load dimensions
+                seniority_map = load_dim_seniority(conn)
+                print(f"[SD:STEP4] {label}: dim_seniority: {len(seniority_map)} levels")
 
-            skill_map = load_dim_skills(dim_skills_dict, conn)
-            print(f"[SD:STEP4] dim_skills: {len(skill_map):,} skills")
+                company_map = load_dim_companies(companies, conn)
+                print(f"[SD:STEP4] {label}: dim_companies: {len(company_map):,} companies")
 
-            # 5. Load facts
-            count_postings = load_fact_postings(df, company_map, seniority_map, conn)
-            print(f"[SD:STEP4] fact_job_postings: {count_postings:,} inserted")
+                skill_map = load_dim_skills(dim_skills_dict, conn)
+                print(f"[SD:STEP4] {label}: dim_skills: {len(skill_map):,} skills")
 
-            count_skills = load_fact_skills(skill_rows, skill_map, conn)
-            print(f"[SD:STEP4] fact_job_skill_demand: {count_skills:,} inserted")
+                # Load facts
+                count_postings = load_fact_postings(df, company_map, seniority_map, conn)
+                print(f"[SD:STEP4] {label}: fact_job_postings: {count_postings:,} inserted")
 
-            # 6. Verify
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM fact_job_postings")
-            db_postings = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM fact_job_skill_demand")
-            db_skills = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM dim_skills")
-            db_dim_skills = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM dim_companies")
-            db_dim_companies = cur.fetchone()[0]
-            cur.execute("SELECT category, COUNT(*) FROM dim_skills GROUP BY category ORDER BY COUNT(*) DESC")
-            cat_counts = cur.fetchall()
-            cur.close()
+                count_skills = load_fact_skills(skill_rows, skill_map, conn)
+                print(f"[SD:STEP4] {label}: fact_job_skill_demand: {count_skills:,} inserted")
 
-            print(f"[SD:STEP4] === DB Verification ===")
-            print(f"  dim_companies:         {db_dim_companies:,}")
-            print(f"  dim_skills:            {db_dim_skills:,}")
-            print(f"  fact_job_postings:     {db_postings:,}")
-            print(f"  fact_job_skill_demand: {db_skills:,} entries")
-            for cat, cnt in cat_counts:
-                print(f"    {cat}: {cnt}")
-        finally:
-            conn.close()
+                # Verify
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM fact_job_postings")
+                db_postings = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM fact_job_skill_demand")
+                db_skills = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM dim_skills")
+                db_dim_skills = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM dim_companies")
+                db_dim_companies = cur.fetchone()[0]
+                cur.execute("SELECT category, COUNT(*) FROM dim_skills GROUP BY category ORDER BY COUNT(*) DESC")
+                cat_counts = cur.fetchall()
+                cur.close()
+
+                print(f"[SD:STEP4] {label}: === DB Verification ===")
+                print(f"  dim_companies:         {db_dim_companies:,}")
+                print(f"  dim_skills:            {db_dim_skills:,}")
+                print(f"  fact_job_postings:     {db_postings:,}")
+                print(f"  fact_job_skill_demand: {db_skills:,} entries")
+                for cat, cnt in cat_counts:
+                    print(f"    {cat}: {cnt}")
+            finally:
+                conn.close()
 
     # =========================================================================
     # Step 4 Review + Final Summary
@@ -962,109 +1050,111 @@ End-to-end pipeline completion report.
         total_complete = int((has_noc_raw & has_skills_raw & has_seniority_raw).sum())
         total_dropped = total_processed - total_complete
 
-        conn = psycopg2.connect(SD_DB_CONN)
-        cur = conn.cursor()
+        # Run summary for each target DB
+        for label, conn_str in _sd_targets():
+            conn = psycopg2.connect(conn_str)
+            cur = conn.cursor()
 
-        # --- DB stats ---
-        cur.execute("SELECT COUNT(*) FROM fact_job_postings")
-        db_postings = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM fact_job_skill_demand")
-        db_skill_facts = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM dim_skills")
-        db_dim_skills = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM dim_companies")
-        db_dim_companies = cur.fetchone()[0]
+            # --- DB stats ---
+            cur.execute("SELECT COUNT(*) FROM fact_job_postings")
+            db_postings = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM fact_job_skill_demand")
+            db_skill_facts = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM dim_skills")
+            db_dim_skills = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM dim_companies")
+            db_dim_companies = cur.fetchone()[0]
 
-        print(f"[SD:STEP4:REVIEW]")
-        print(f"  fact_job_postings:     {db_postings:,}")
-        print(f"  fact_job_skill_demand: {db_skill_facts:,} entries")
-        print(f"  dim_skills:            {db_dim_skills:,}")
-        print(f"  dim_companies:         {db_dim_companies:,}")
+            print(f"\n[SD:STEP4:REVIEW] {label}")
+            print(f"  fact_job_postings:     {db_postings:,}")
+            print(f"  fact_job_skill_demand: {db_skill_facts:,} entries")
+            print(f"  dim_skills:            {db_dim_skills:,}")
+            print(f"  dim_companies:         {db_dim_companies:,}")
 
-        # --- Final Pipeline Summary ---
-        cur.execute("SELECT COUNT(*) FROM fact_job_postings WHERE noc_id IS NOT NULL")
-        with_noc = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM fact_job_postings WHERE seniority_id IS NOT NULL")
-        with_sen = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(DISTINCT n.noc21_code) FROM fact_job_postings p JOIN noc_titles n ON p.noc_id = n.id")
-        noc_covered = cur.fetchone()[0]
-        cur.execute("SELECT ROUND(AVG(cnt)::numeric, 1) FROM (SELECT COUNT(*) as cnt FROM fact_job_skill_demand GROUP BY job_id) sub")
-        avg_skills = cur.fetchone()[0]
+            # --- Final Pipeline Summary ---
+            cur.execute("SELECT COUNT(*) FROM fact_job_postings WHERE noc_id IS NOT NULL")
+            with_noc = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM fact_job_postings WHERE seniority_id IS NOT NULL")
+            with_sen = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(DISTINCT n.noc21_code) FROM fact_job_postings p JOIN noc_titles n ON p.noc_id = n.id")
+            noc_covered = cur.fetchone()[0]
+            cur.execute("SELECT ROUND(AVG(cnt)::numeric, 1) FROM (SELECT COUNT(*) as cnt FROM fact_job_skill_demand GROUP BY job_id) sub")
+            avg_skills = cur.fetchone()[0]
 
-        print(f"\n{'='*60}")
-        print(f"  SD:FINAL — PIPELINE COMPLETE")
-        print(f"{'='*60}")
-        print(f"  Total dataset:   123,782")
-        print(f"  Processed:       {total_processed:,} ({total_processed/123782*100:.1f}%)")
-        print(f"  Quality filter:  {total_dropped:,} dropped ({total_dropped/total_processed*100:.1f}%)")
-        print(f"    Missing NOC:       {int((~has_noc_raw).sum()):,}")
-        print(f"    Missing skills:    {int((~has_skills_raw).sum()):,}")
-        print(f"    Missing seniority: {int((~has_seniority_raw).sum()):,}")
-        print(f"  DB loaded:       {db_postings:,} ({db_postings/123782*100:.1f}% of total)")
-        print(f"  NOC classified:  {with_noc:,}/{db_postings:,} ({with_noc/db_postings*100:.1f}%)")
-        print(f"  Seniority:       {with_sen:,}/{db_postings:,} ({with_sen/db_postings*100:.1f}%)")
-        print(f"  NOC coverage:    {noc_covered} / 510 categories")
-        print(f"  Skills:          {db_skill_facts:,} fact entries, {db_dim_skills:,} unique (normalized)")
-        print(f"  Avg skills/post: {avg_skills}")
+            print(f"\n{'='*60}")
+            print(f"  SD:FINAL — PIPELINE COMPLETE ({label.upper()})")
+            print(f"{'='*60}")
+            print(f"  Total dataset:   123,782")
+            print(f"  Processed:       {total_processed:,} ({total_processed/123782*100:.1f}%)")
+            print(f"  Quality filter:  {total_dropped:,} dropped ({total_dropped/total_processed*100:.1f}%)")
+            print(f"    Missing NOC:       {int((~has_noc_raw).sum()):,}")
+            print(f"    Missing skills:    {int((~has_skills_raw).sum()):,}")
+            print(f"    Missing seniority: {int((~has_seniority_raw).sum()):,}")
+            print(f"  DB loaded:       {db_postings:,} ({db_postings/123782*100:.1f}% of total)")
+            print(f"  NOC classified:  {with_noc:,}/{db_postings:,} ({with_noc/db_postings*100:.1f}%)")
+            print(f"  Seniority:       {with_sen:,}/{db_postings:,} ({with_sen/db_postings*100:.1f}%)")
+            print(f"  NOC coverage:    {noc_covered} / 510 categories")
+            print(f"  Skills:          {db_skill_facts:,} fact entries, {db_dim_skills:,} unique (normalized)")
+            print(f"  Avg skills/post: {avg_skills}")
 
-        # Category breakdown (from dim_skills)
-        cur.execute("SELECT category, COUNT(*) FROM dim_skills GROUP BY category ORDER BY COUNT(*) DESC")
-        print(f"\n  Skill Categories (dim_skills):")
-        for cat, cnt in cur.fetchall():
-            print(f"    {cat:<15} {cnt:>8,}")
+            # Category breakdown (from dim_skills)
+            cur.execute("SELECT category, COUNT(*) FROM dim_skills GROUP BY category ORDER BY COUNT(*) DESC")
+            print(f"\n  Skill Categories (dim_skills):")
+            for cat, cnt in cur.fetchall():
+                print(f"    {cat:<15} {cnt:>8,}")
 
-        # Seniority breakdown
-        cur.execute("""
-            SELECT ds.level, COUNT(*)
-            FROM fact_job_postings p
-            JOIN dim_seniority ds ON p.seniority_id = ds.id
-            GROUP BY ds.level ORDER BY COUNT(*) DESC
-        """)
-        print(f"\n  Seniority:")
-        for sen, cnt in cur.fetchall():
-            print(f"    {sen:<15} {cnt:>8,}")
+            # Seniority breakdown
+            cur.execute("""
+                SELECT ds.level, COUNT(*)
+                FROM fact_job_postings p
+                JOIN dim_seniority ds ON p.seniority_id = ds.id
+                GROUP BY ds.level ORDER BY COUNT(*) DESC
+            """)
+            print(f"\n  Seniority:")
+            for sen, cnt in cur.fetchall():
+                print(f"    {sen:<15} {cnt:>8,}")
 
-        # Top 10 skills (from fact + dim join)
-        cur.execute("""
-            SELECT sk.name, sk.category, COUNT(*) as cnt
-            FROM fact_job_skill_demand f
-            JOIN dim_skills sk ON f.skill_id = sk.id
-            GROUP BY sk.name, sk.category
-            ORDER BY cnt DESC LIMIT 10
-        """)
-        print(f"\n  Top 10 Skills:")
-        print(f"    {'Skill':<30} {'Category':<15} {'Count':>6}")
-        print(f"    {'-'*55}")
-        for skill, cat, cnt in cur.fetchall():
-            print(f"    {skill:<30} {cat:<15} {cnt:>6,}")
+            # Top 10 skills (from fact + dim join)
+            cur.execute("""
+                SELECT sk.name, sk.category, COUNT(*) as cnt
+                FROM fact_job_skill_demand f
+                JOIN dim_skills sk ON f.skill_id = sk.id
+                GROUP BY sk.name, sk.category
+                ORDER BY cnt DESC LIMIT 10
+            """)
+            print(f"\n  Top 10 Skills:")
+            print(f"    {'Skill':<30} {'Category':<15} {'Count':>6}")
+            print(f"    {'-'*55}")
+            for skill, cat, cnt in cur.fetchall():
+                print(f"    {skill:<30} {cat:<15} {cnt:>6,}")
 
-        # Sample 10 postings
-        cur.execute("""
-            SELECT dc.name, p.raw_title, ds.level,
-                   (SELECT COUNT(*) FROM fact_job_skill_demand f WHERE f.job_id = p.job_id) as skills,
-                   (SELECT STRING_AGG(sk.name, ', ')
-                    FROM (SELECT skill_id FROM fact_job_skill_demand WHERE job_id = p.job_id LIMIT 3) f2
-                    JOIN dim_skills sk ON f2.skill_id = sk.id
-                   ) as top_skills
-            FROM fact_job_postings p
-            LEFT JOIN dim_companies dc ON p.company_id = dc.id
-            LEFT JOIN dim_seniority ds ON p.seniority_id = ds.id
-            WHERE p.noc_id IS NOT NULL
-            ORDER BY RANDOM() LIMIT 10
-        """)
-        print(f"\n  Sample 10 Postings:")
-        print(f"    {'Company':<25} {'Title':<30} {'Seniority':<12} {'#':>3} {'Top Skills'}")
-        print(f"    {'-'*100}")
-        for company, title, sen, skills_cnt, top_skills in cur.fetchall():
-            co = (company or "")[:24]
-            ti = (title or "")[:29]
-            sn = (sen or "?")[:11]
-            ts = (top_skills or "")[:40]
-            print(f"    {co:<25} {ti:<30} {sn:<12} {skills_cnt:>3} {ts}")
+            # Sample 10 postings
+            cur.execute("""
+                SELECT dc.name, p.raw_title, ds.level,
+                       (SELECT COUNT(*) FROM fact_job_skill_demand f WHERE f.job_id = p.job_id) as skills,
+                       (SELECT STRING_AGG(sk.name, ', ')
+                        FROM (SELECT skill_id FROM fact_job_skill_demand WHERE job_id = p.job_id LIMIT 3) f2
+                        JOIN dim_skills sk ON f2.skill_id = sk.id
+                       ) as top_skills
+                FROM fact_job_postings p
+                LEFT JOIN dim_companies dc ON p.company_id = dc.id
+                LEFT JOIN dim_seniority ds ON p.seniority_id = ds.id
+                WHERE p.noc_id IS NOT NULL
+                ORDER BY RANDOM() LIMIT 10
+            """)
+            print(f"\n  Sample 10 Postings:")
+            print(f"    {'Company':<25} {'Title':<30} {'Seniority':<12} {'#':>3} {'Top Skills'}")
+            print(f"    {'-'*100}")
+            for company, title, sen, skills_cnt, top_skills in cur.fetchall():
+                co = (company or "")[:24]
+                ti = (title or "")[:29]
+                sn = (sen or "?")[:11]
+                ts = (top_skills or "")[:40]
+                print(f"    {co:<25} {ti:<30} {sn:<12} {skills_cnt:>3} {ts}")
 
-        print(f"\n{'='*60}")
-        cur.close()
-        conn.close()
+            print(f"\n{'='*60}")
+            cur.close()
+            conn.close()
 
     # =========================================================================
     # Infrastructure — Stop Workers (after Spark jobs, before DB load)
@@ -1129,10 +1219,12 @@ End-to-end pipeline completion report.
     final = step4_review_final_summary()
 
     vp = validate_params()
+    ping = ping_targets()
 
     # validate_params → [ensure_db + start_spark] parallel, noc after db → download
+    # ping_targets runs after ensure_db (local DB must be up before ping)
     vp >> [ensure_db, start_spark_cluster]
-    ensure_db >> noc
+    ensure_db >> ping >> noc
     [noc, start_spark_cluster] >> dl >> v1 >> s1
     s1 >> bridge_12 >> s2 >> bridge_23 >> s3
 

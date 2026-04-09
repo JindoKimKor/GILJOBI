@@ -42,6 +42,8 @@ x-airflow-common: &airflow-common
     AIRFLOW_CONN_LIVY_SD: http://livy-sd:8998
     # Pipeline config — passed to DAG tasks
     PIPELINE_DB_CONN: ${PIPELINE_DB_CONN}
+    SKILL_DEMAND_DB_CONN: ${SKILL_DEMAND_DB_CONN:-postgresql://postgres:postgres@skill-demand-db:5432/giljobi_sd}
+    SKILL_DEMAND_DB_CONN_NEON: ${SKILL_DEMAND_DB_CONN_NEON:-}
     MANAGE_PIPELINE_DB: ${MANAGE_PIPELINE_DB:-true}
     MANAGE_SPARK: ${MANAGE_SPARK:-true}
     # Host path for Docker-in-Docker volume mounts (init scripts, etc.)
