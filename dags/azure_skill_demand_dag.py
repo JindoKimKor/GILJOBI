@@ -159,15 +159,6 @@ with DAG(
         print(f"  Container: pipeline-data")
         print(f"  Last modified: {props.last_modified}")
 
-        # Quick check — count top-level folders only (avoid listing 10K+ checkpoints)
-        folders = set()
-        for blob in container.list_blobs(name_starts_with="processed/skill-demand/"):
-            folder = blob.name.split("/")[2] if len(blob.name.split("/")) > 2 else ""
-            folders.add(folder)
-            if len(folders) >= 10:
-                break
-        print(f"  Processed folders: {folders}")
-
     # =========================================================================
     # Ping DB Targets
     # =========================================================================
