@@ -49,10 +49,53 @@ runcmd:
   - su - azureuser -c "git clone https://${github_pat}@github.com/JindoKimKor/GILJOBI.git /home/azureuser/giljobi"
   - su - azureuser -c "cd /home/azureuser/giljobi && git checkout ${git_branch}"
 
-  # ── Directory permissions (Airflow container writes here) ───
+  # ── blobfuse2 mount (Azure Blob Storage → /home/azureuser/giljobi/data) ──
+  # Pipeline data (raw CSV, processed parquet, checkpoints) lives on Blob.
+  # Mounting to /home/azureuser/giljobi/data/ means existing code paths
+  # (/opt/airflow/data/ in container) write directly to Blob Storage.
+  # Data survives VM destroy — only infrastructure is disposable.
+  - mkdir -p /home/azureuser/giljobi/data
+  - mkdir -p /tmp/blobfuse2-cache
+  - |
+    cat > /home/azureuser/blobfuse2-config.yaml << 'BLOBEOF'
+    allow-other: true
+    logging:
+      type: syslog
+      level: log_warning
+    components:
+      - libfuse
+      - file_cache
+      - attr_cache
+      - azstorage
+    libfuse:
+      attribute-expiration-sec: 120
+      entry-expiration-sec: 120
+      negative-entry-expiration-sec: 60
+    file_cache:
+      path: /tmp/blobfuse2-cache
+      timeout-sec: 120
+      max-size-mb: 4096
+    attr_cache:
+      timeout-sec: 7200
+    azstorage:
+      type: block
+      account-name: ${storage_account_name}
+      account-key: ${storage_account_key}
+      endpoint: https://${storage_account_name}.blob.core.windows.net
+      mode: key
+      container: pipeline-data
+    BLOBEOF
+  - blobfuse2 mount /home/azureuser/giljobi/data --config-file=/home/azureuser/blobfuse2-config.yaml
+  # Create subdirectories on Blob (first access creates them)
   - mkdir -p /home/azureuser/giljobi/data/raw/skill-demand /home/azureuser/giljobi/data/raw/market-trend /home/azureuser/giljobi/data/processed
   - chmod -R 777 /home/azureuser/giljobi/data/
+
+  # ── Persist blobfuse2 mount across VM reboots ──────────────
+  # fstab entry ensures mount survives VM stop/start
+  - echo "blobfuse2 /home/azureuser/giljobi/data fuse3 --config-file=/home/azureuser/blobfuse2-config.yaml,_netdev,allow_other 0 0" >> /etc/fstab
+
   # Airflow logs directory — scheduler/worker need write access
+  # Logs stay on local disk (not Blob) — high frequency small writes
   - mkdir -p /home/azureuser/giljobi/infra/logs
   - chmod -R 777 /home/azureuser/giljobi/infra/logs
 

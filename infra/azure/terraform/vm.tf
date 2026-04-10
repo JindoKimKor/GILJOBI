@@ -41,6 +41,8 @@ resource "azurerm_linux_virtual_machine" "airflow" {
     databricks_host           = azurerm_databricks_workspace.giljobi.workspace_url
     databricks_token          = databricks_token.airflow.token_value
     storage_connection_string = azurerm_storage_account.giljobi.primary_connection_string
+    storage_account_name      = azurerm_storage_account.giljobi.name
+    storage_account_key       = azurerm_storage_account.giljobi.primary_access_key
     git_branch                = "infra/azure-deployment"
   }))
 
