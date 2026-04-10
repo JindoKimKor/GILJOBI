@@ -33,16 +33,19 @@ def select_columns(csv_path: str) -> pd.DataFrame:
     Raises:
         ValueError: If any required column is missing from the CSV.
     """
-    df = pd.read_csv(csv_path)
-
-    missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+    # Read header first to validate columns (no data loaded)
+    header = pd.read_csv(csv_path, nrows=0)
+    missing = [col for col in REQUIRED_COLUMNS if col not in header.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
 
-    df = df[REQUIRED_COLUMNS].copy()
-    df = df.dropna(subset=["title", "description"])
-    df = df.reset_index(drop=True)
+    # Read in chunks to avoid OOM on large files (516MB postings.csv)
+    chunks = []
+    for chunk in pd.read_csv(csv_path, usecols=REQUIRED_COLUMNS, chunksize=50000):
+        chunk = chunk.dropna(subset=["title", "description"])
+        chunks.append(chunk)
 
+    df = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame(columns=REQUIRED_COLUMNS)
     return df
 
 

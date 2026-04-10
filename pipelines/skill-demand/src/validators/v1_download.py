@@ -45,7 +45,10 @@ def validate_download(csv_path: str) -> dict:
     if missing:
         return {"valid": False, "error": f"Missing required columns: {missing}"}
 
-    # Count total rows (read only the first column for speed)
-    total = len(pd.read_csv(csv_path, usecols=[0]))
+    # Count total rows without loading full file into memory
+    # (postings.csv is 516MB — pd.read_csv causes OOM on 2GB worker)
+    total = 0
+    for chunk in pd.read_csv(csv_path, usecols=[0], chunksize=10000):
+        total += len(chunk)
 
     return {"valid": True, "rows": total}
