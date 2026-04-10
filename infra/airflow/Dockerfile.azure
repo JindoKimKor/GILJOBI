@@ -1,0 +1,73 @@
+# =============================================================================
+# infra/azure/airflow/Dockerfile
+# -----------------------------------------------------------------------------
+# Purpose : Custom Airflow image for Azure cloud deployment
+# Base    : apache/airflow:2.10.5-python3.12 (CeleryExecutor-ready)
+# Added   : Docker Compose CLI, Databricks provider, Azure Blob SDK,
+#           pandas, psycopg2, pyarrow, requests, inflect
+#
+# Difference from local Dockerfile (infra/airflow/Dockerfile):
+#   - Replaces apache-airflow-providers-apache-livy with:
+#     - apache-airflow-providers-databricks (DatabricksSubmitRunOperator)
+#     - azure-storage-blob (Blob Storage connectivity check in DAG)
+#   - No Livy — Spark runs on Azure Databricks, not local Docker
+#
+# Used by : airflow-webserver, airflow-scheduler, airflow-worker, airflow-init
+#           in docker-compose.airflow.yml on Azure VM
+# =============================================================================
+
+FROM apache/airflow:2.10.5-python3.12
+
+# -----------------------------------------------------------------------------
+# 1. Docker Compose CLI (as root)
+#    DAGs no longer start/stop Spark via Docker in Azure mode,
+#    but Docker CLI is still needed for potential local DB management
+#    or debugging. Requires /var/run/docker.sock mounted in compose file.
+# -----------------------------------------------------------------------------
+USER root
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends docker-compose-plugin docker-ce-cli && \
+    rm -rf /var/lib/apt/lists/*
+USER airflow
+
+# -----------------------------------------------------------------------------
+# 2. Python packages
+#    IMPORTANT: Pin apache-airflow==${AIRFLOW_VERSION} to prevent pip from
+#    accidentally downgrading or removing Airflow during dependency resolution.
+#    See: https://github.com/apache/airflow/discussions/53623
+#
+#    Azure-specific providers:
+#    - apache-airflow-providers-databricks : DatabricksSubmitRunOperator
+#      → Submits Spark jobs to Azure Databricks (replaces Livy in cloud mode)
+#    - azure-storage-blob                  : Azure Blob Storage SDK
+#      → DAG check_blob_storage task verifies pipeline-data container access
+#
+#    Shared packages (same as local Dockerfile):
+#    - pandas         : DataFrame operations in DAG tasks
+#    - psycopg2-binary: PostgreSQL connection for Neon DB (load stage)
+#    - pyarrow        : Parquet I/O between pipeline stages
+#    - requests       : HTTP client for API calls in DAG tasks
+#    - inflect        : Skill normalization — plural→singular (Step 4 load)
+#                       Pinned inflect==7.0.0 + typeguard==4.1.0 — latest inflect
+#                       pulls typeguard 4.5+ which requires typing_extensions.NoExtraItems
+#                       not available in Airflow's typing_extensions 4.15.0
+# -----------------------------------------------------------------------------
+ARG AIRFLOW_VERSION=2.10.5
+RUN pip install --no-cache-dir \
+    "apache-airflow==${AIRFLOW_VERSION}" \
+    apache-airflow-providers-databricks \
+    azure-storage-blob \
+    pandas \
+    psycopg2-binary \
+    "pyarrow>=23.0" \
+    requests \
+    "inflect==7.0.0" \
+    "typeguard==4.1.0"
