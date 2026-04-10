@@ -1,6 +1,6 @@
 # Azure Cloud Infrastructure Specification
 
-**Purpose:** Deploy the GILJOBI Data Pipeline + Resume Analysis Service to Azure.
+**Purpose:** Deploy the GILJOBI Data Pipeline (Airflow + Spark) to Azure.
 **Duration:** 7-day demo → `terraform apply` to create, `terraform destroy` to tear down.
 **Budget:** Azure for Students ($100 credit)
 **Region:** Canada Central (6 vCPU quota)
@@ -14,27 +14,19 @@
 │   Vercel    │     │   Render    │                                    │ Neon DB  │
 │  (Frontend) │────▶│  (Backend)  │───────────────────────────────────▶│ (Shared) │
 │  Node/EJS   │     │ Spring Boot │                                    │ market-  │
-└──────┬──────┘     └──────┬──────┘                                    │ trend +  │
-       │                   │                                            │ skill-   │
-       │            ┌──────▼─────────────── Azure ───────────────────┐ │ demand   │
-       │            │                                                │ └────┬─────┘
-       │            │  ┌──────────────────────────────────────────┐  │      │
-       │            │  │  VM (B6as_v2: 6 vCPU, 24GB)                │  │      │
-       │            │  │  Docker Compose (same as local)          │  │      │
-       │            │  │                                          │  │      │
-       │            │  │  Airflow (webserver, scheduler, worker)  │  │      │
-       │            │  │  Spark (master, worker(s), livy)         │──│──────┘
-       │            │  │  Resume Service (FastAPI + Claude CLI)   │  │
-       │            │  │  Nginx (reverse proxy + SSL)             │  │
-       │            │  └──────────────────────────────────────────┘  │
-       │            │          │                                      │
-       │            │                                                │
-       │     WebSocket                                               │
-       └───────────────▶ Resume Service (same VM, port 8000) ───────│──┐
-                    │                    reads both DBs directly      │  │
-                    └────────────────────────────────────────────────┘  │
-                                                                       │
-                                                         Neon DB ◀─────┘
+└─────────────┘     └──────┬──────┘                                    │ trend +  │
+                           │                                            │ skill-   │
+                    ┌──────▼─────────────── Azure ───────────────────┐ │ demand   │
+                    │                                                │ └────┬─────┘
+                    │  ┌──────────────────────────────────────────┐  │      │
+                    │  │  VM (B6as_v2: 6 vCPU, 24GB)             │  │      │
+                    │  │  Docker Compose (same as local)          │  │      │
+                    │  │                                          │  │      │
+                    │  │  Airflow (webserver, scheduler, worker)  │  │      │
+                    │  │  Spark (master, worker(s), livy)         │──│──────┘
+                    │  │  Nginx (reverse proxy + SSL)             │  │
+                    │  └──────────────────────────────────────────┘  │
+                    └────────────────────────────────────────────────┘
 ```
 
 | Service | Platform | Why There |
@@ -44,7 +36,8 @@
 | Pipeline + Spark | **Azure VM** + Docker Compose | **Same compose files as local** — Airflow + Spark + Livy, zero code change |
 | Data Storage | **VM disk** (32GB) | 7-day demo — no need for persistent external storage |
 | Database | Neon DB | 기존 유지, 모든 서비스에서 동일 URL 접근 |
-| Resume API | **Same VM** (TBD) | FastAPI + Claude CLI + WebSocket |
+
+> Resume Analysis Service는 별도 repo [`Giljobi-ResumeService`](https://github.com/JindoKimKor/Giljobi-ResumeService)로 분리됨 (Azure Container Apps).
 
 ### Why VM + Docker Compose (not Databricks)
 
@@ -59,13 +52,6 @@ Azure for Students vCPU quota (6 per region) is too small for Databricks:
 - Spark runs in Docker containers on the VM (same as local)
 - Airflow DAG code unchanged — same `@task + LivyHook` pattern
 - `up.sh airflow spark-sd` works identically on VM and local
-
-### Resume API 연결 구조
-
-```
-기존 데이터 조회:  Frontend → Backend (Render) → Neon DB
-Resume 분석:      Frontend → VM Resume Service (WebSocket) → Neon DB (양쪽) + Claude CLI
-```
 
 ---
 
@@ -93,7 +79,6 @@ Azure Resource Group: giljobi-rg (canadacentral)
     └── Services (Docker Compose — same files as local):
         ├── Airflow (webserver, scheduler, worker, redis, airflow-db)
         ├── Spark (master, worker(s), livy)
-        ├── Resume Service (FastAPI + Claude CLI) — TBD
         └── Nginx (reverse proxy + SSL)
 ```
 
@@ -116,8 +101,7 @@ Azure VM (giljobi-vm)
 │
 ├── Docker Network: giljobi-network
 │   ├── Airflow (8090, 5433)
-│   ├── Spark (7077, 8080, 8998)
-│   └── Resume Service (8000) — TBD
+│   └── Spark (7077, 8080, 8998)
 │
 └── Mounted:
     ├── /var/run/docker.sock           ← Docker-in-Docker (Airflow worker)
@@ -134,7 +118,7 @@ Azure VM (giljobi-vm)
 
 ```
 VM:
-  Airflow → LivyHook → Spark (Docker on same VM) → Blob Storage → Neon DB
+  Airflow → LivyHook → Spark (Docker on same VM) → VM disk → Neon DB
 ```
 
 Same as local. Data stored on VM disk (32GB).
@@ -172,7 +156,7 @@ infra/azure/
 │   ├── main.tf               # Provider (azurerm), resource group
 │   ├── variables.tf          # VM size, region, credentials
 │   ├── network.tf            # VNet, subnet, NSG, public IP
-│   ├── vm.tf                 # VM + cloud-init
+│   ├── vm.tf                 # VM + cloud-init (Airflow + Spark)
 │   ├── outputs.tf            # VM IP, Airflow URL
 │   ├── cloud-init.yaml       # VM 부팅 자동 설정
 │   ├── terraform.tfvars      # 실제 값 (.gitignore)
@@ -185,17 +169,14 @@ infra/azure/
 # 인프라 생성 (데모 시작)
 cd infra/azure/terraform
 terraform init
-terraform apply              # ~5분 → VM + Blob Storage 생성
-                             # cloud-init 자동: Docker, repo clone, blobfuse2, .env, Airflow start
+terraform apply              # ~5분 → VM 생성
+                             # cloud-init 자동: Docker, repo clone, .env, Airflow start
 
 # cloud-init 완료 후 자동으로:
 #   - Airflow 실행 (http://<public-ip>:8090)
-#   - Blob Storage 마운트 (data/ → pipeline-data container)
-#   - 기존 checkpoints 접근 가능
 
 # 데모 종료
 terraform destroy            # VM 삭제, 비용 0
-                             # Blob Storage 데이터는 유지 (별도 삭제 필요)
 ```
 
 ### cloud-init 자동 실행 내용
@@ -217,122 +198,16 @@ VM 생성 시 자동으로:
 | SSH | Key-based only, password 비활성화 |
 | Airflow UI | NSG에서 특정 IP만 허용 또는 basic auth |
 | Neon DB | SSL required, connection string은 `.env`에만 |
-| Claude credentials | VM 내부 volume, 외부 접근 불가 |
+| Claude credentials | VM 내부, 외부 접근 불가 |
 | GitHub PAT | Terraform sensitive variable, .env에만 |
-
----
-
-## Resume API — Resume × Job Market 매칭 (TBD)
-
-### Platform
-
-| 항목 | 결정 |
-|------|------|
-| Platform | Same Azure VM (Docker container) |
-| Framework | FastAPI + Claude CLI |
-| 통신 | WebSocket (단계별 스트리밍) |
-| 연결 | Frontend (Vercel) ↔ VM ↔ Neon DB (양쪽) + Claude CLI |
-
-### Use Case
-
-사용자가 Resume를 업로드하고 target seniority + NOC title을 선택하면, 시장 데이터 기반으로 매칭 분석을 제공.
-
-### 사용자 입력
-
-```
-1. Resume (PDF or text) — drag & drop
-2. Target seniority — 드롭다운 (intern / entry / mid / senior / executive)
-3. Target NOC title — 검색 드롭다운 (510개 중 선택)
-```
-
-### 결과 구성 (4 sections)
-
-#### Section 1: Target NOC 매치율
-
-```
-"Software engineers and designers" — 78% match (12/15 skills)
-
-✅ 보유 스킬:        python, java, sql, aws, docker, git, rest api, ...
-❌ 부족 스킬:        kubernetes, terraform, ci/cd
-```
-
-**데이터 소스:** `dim_skills` + `fact_job_skill_demand`
-**LLM 역할:** Resume에서 스킬 추출
-
-#### Section 2: 다른 NOC 유사도 TOP 5
-
-```
-1. Data scientists (21211)              — 71% match
-2. Web developers and programmers (21234) — 68% match
-3. Database analysts (21223)             — 65% match
-```
-
-**데이터 소스:** 전체 NOC 스킬 교집합 비율
-**LLM 역할:** 없음 (DB 쿼리 + 계산)
-
-#### Section 3: 가장 유사한 실제 Job Posting
-
-```
-🏢 Google — Senior Software Engineer
-
-Job Description:
-"We are looking for a Senior Software Engineer with experience in
- [✅ Python], [✅ distributed systems], and [❌ Kubernetes]..."
-
-매치율: 85%
-```
-
-**데이터 소스:** `fact_job_postings` (스킬 overlap 최대)
-**LLM 역할:** JD 하이라이트 마킹
-
-#### Section 4: 강점 & Gap 분석
-
-```
-💪 강점: Backend 스택 일치율 높음 (Python, Java, SQL)
-📋 Gap: Kubernetes (82% 요구), CI/CD (74%), 경력 5+ years
-🎯 추천: Kubernetes 학습 우선, Data Scientist 방향도 유리
-```
-
-**LLM 역할:** 종합 분석 텍스트 생성
-
-### 처리 흐름 (WebSocket 단계별 스트리밍)
-
-```
-Frontend                          Resume Service (VM:8000)
-   │                                     │
-   ├─ WS connect ──────────────────────▶ │
-   ├─ send: {resume, seniority, noc} ──▶ │
-   │                                     │
-   │  ◀── {"stage": "extracting"}        ├─ 1. Claude CLI: resume → skills
-   │  ◀── {"stage": "extracted", ...}    │
-   │  ◀── {"stage": "matching_noc"}      ├─ 2. DB: target NOC 스킬 비교
-   │  ◀── {"stage": "noc_match", ...}    │
-   │  ◀── {"stage": "finding_similar"}   ├─ 3. DB: 전체 NOC 유사도
-   │  ◀── {"stage": "similar_nocs", ...} │
-   │  ◀── {"stage": "finding_posting"}   ├─ 4. DB: 가장 유사한 job posting
-   │  ◀── {"stage": "best_posting", ...} │
-   │  ◀── {"stage": "analyzing"}         ├─ 5. Claude CLI: 종합 분석
-   │  ◀── {"stage": "analysis", ...}     │
-   │  ◀── {"stage": "done"}              │
-   └─ WS close ─────────────────────────┘
-```
-
-### LLM 호출 (2회)
-
-| # | 목적 | Input | Output |
-|---|------|-------|--------|
-| 1 | Resume → skills 추출 | resume text | `["python", "aws", ...]` |
-| 2 | 종합 분석 생성 | resume skills + DB 매칭 + best JD | strengths, gaps, recommendations, JD highlight |
-
-매칭 계산 자체는 DB 쿼리 — LLM은 추출과 분석 텍스트 생성에만 사용.
 
 ---
 
 ## 구현 순서
 
 ```
-Phase 1: Terraform 기본 인프라 (canadacentral)
-  - main.tf, network.tf, vm.tf (Databricks + Blob Storage 제거)
+Phase 1: Terraform VM 인프라 (canadacentral)
+  - main.tf, network.tf, vm.tf
   - terraform apply → VM 생성
   - cloud-init → Docker, repo clone, .env, Airflow 자동 시작
 
@@ -340,13 +215,7 @@ Phase 2: 파이프라인 동작 확인
   - Airflow UI 접근 (http://<ip>:8090)
   - DAG trigger → Spark (Docker on VM) → Neon DB 적재
 
-Phase 3: Resume API (use case 확정됨)
-  - FastAPI + Claude CLI Docker container
-  - WebSocket 단계별 스트리밍
-  - Neon DB 직접 조회
-  - Frontend 연결
-
-Phase 4: 데모
+Phase 3: 데모
   - terraform apply (fresh start)
   - 전체 시연
   - terraform destroy (정리)
@@ -374,3 +243,13 @@ Phase 4: 데모
 - 클라우드 managed 서비스는 minimum resource 요구사항 확인 필수
 - Azure for Students quota 제한은 사전 조사 필요
 - VM + Docker Compose는 "적절한 도구 선택"이지 타협이 아님
+
+### Resume Service 분리 (2026-04-10)
+
+**변경:** DataPipeline repo에서 Resume Service를 별도 repo [`Giljobi-ResumeService`](https://github.com/JindoKimKor/Giljobi-ResumeService)로 분리.
+
+**이유:**
+- 다른 lifecycle — batch(가끔) vs 실시간(항상 대기)
+- 다른 배포 대상 — VM Docker Compose vs Azure Container Apps
+- 다른 의존성 — Airflow/Spark vs FastAPI/Claude CLI
+- 독립 CI/CD

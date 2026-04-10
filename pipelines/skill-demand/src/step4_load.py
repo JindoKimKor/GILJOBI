@@ -53,12 +53,19 @@ def normalize_skills(skill_rows: list[dict]) -> tuple[list[dict], dict, dict]:
     import inflect
     p = inflect.engine()
 
-    # Words that should stay plural (business/domain terms)
+    # Words that should stay plural (trailing 's' is part of the word, not a plural marker)
     KEEP_PLURAL = {
+        # Business/domain terms
         "sales", "operations", "logistics", "analytics", "economics",
         "mathematics", "statistics", "physics", "electronics", "robotics",
         "dynamics", "graphics", "ceramics", "genetics", "orthotics",
         "prosthetics", "diagnostics", "informatics", "bioinformatics",
+        # Tech product names (inflect incorrectly strips trailing 's')
+        "aws", "devops", "kubernetes", "jenkins", "windows", "microservices",
+        # Science/engineering terms
+        "acoustics", "aerodynamics", "biostatistics", "econometrics",
+        "hydraulics", "kinematics", "optics", "pneumatics",
+        "telecommunications", "thermodynamics",
     }
 
     # Step 1: plural → singular
