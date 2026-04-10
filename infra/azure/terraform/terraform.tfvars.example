@@ -2,13 +2,24 @@
 # terraform.tfvars.example — Copy to terraform.tfvars and fill in values
 # =============================================================================
 # cp terraform.tfvars.example terraform.tfvars
-# terraform.tfvars is gitignored
+# terraform.tfvars is gitignored — never commit secrets
 # =============================================================================
 
+# Azure
 resource_group_name  = "giljobi-rg"
 location             = "eastus"
 vm_size              = "Standard_B4ms"
 admin_username       = "azureuser"
-ssh_public_key_path  = "~/.ssh/id_rsa.pub"
+ssh_public_key_path  = "~/.ssh/giljobi_azure.pub"
 admin_ip             = "*"                  # restrict to your IP: "x.x.x.x/32"
 storage_account_name = "giljobistorage"     # must be globally unique
+
+# Airflow
+airflow_admin_user     = "giljobi"
+airflow_admin_password = "your-password-here"
+
+# GitHub (private repo clone on VM)
+github_pat = "github_pat_xxxxxxxxxxxx"
+
+# Neon DB (external — skill-demand)
+neon_skill_demand_db_url = "postgresql://user:password@host/dbname?sslmode=require"

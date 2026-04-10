@@ -14,11 +14,21 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 3.100"
     }
+    databricks = {
+      source  = "databricks/databricks"
+      version = "~> 1.50"
+    }
   }
 }
 
 provider "azurerm" {
   features {}
+}
+
+# Databricks provider — authenticates via Azure AD (same az login session)
+# Workspace URL is resolved after azurerm_databricks_workspace is created
+provider "databricks" {
+  host = azurerm_databricks_workspace.giljobi.workspace_url
 }
 
 # =============================================================================

@@ -32,3 +32,23 @@ output "storage_account_key" {
   value       = azurerm_storage_account.giljobi.primary_access_key
   sensitive   = true
 }
+
+output "storage_connection_string" {
+  description = "Blob Storage connection string (sensitive)"
+  value       = azurerm_storage_account.giljobi.primary_connection_string
+  sensitive   = true
+}
+
+output "databricks_token" {
+  description = "Databricks PAT token for Airflow (sensitive)"
+  value       = databricks_token.airflow.token_value
+  sensitive   = true
+}
+
+# Airflow connection string format for Databricks
+# Set as AIRFLOW_CONN_DATABRICKS_DEFAULT in .env
+output "airflow_databricks_conn" {
+  description = "Airflow connection string for Databricks (sensitive)"
+  value       = "databricks://${azurerm_databricks_workspace.giljobi.workspace_url}?token=${databricks_token.airflow.token_value}"
+  sensitive   = true
+}

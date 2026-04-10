@@ -48,3 +48,31 @@ variable "storage_account_name" {
   type        = string
   default     = "giljobistorage"
 }
+
+# ── Neon DB (external — not created by Terraform) ────────────
+variable "neon_skill_demand_db_url" {
+  description = "Neon DB connection string for skill-demand (postgresql://...)"
+  type        = string
+  sensitive   = true
+}
+
+# ── Airflow ──────────────────────────────────────────────────
+variable "airflow_admin_user" {
+  description = "Airflow web UI admin username"
+  type        = string
+  default     = "giljobi"
+}
+
+variable "airflow_admin_password" {
+  description = "Airflow web UI admin password"
+  type        = string
+  sensitive   = true
+  default     = "dgj1234"
+}
+
+# ── GitHub (for VM repo clone) ───────────────────────────────
+variable "github_pat" {
+  description = "GitHub PAT for cloning private repo on VM"
+  type        = string
+  sensitive   = true
+}

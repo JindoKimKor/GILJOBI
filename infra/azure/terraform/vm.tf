@@ -32,7 +32,17 @@ resource "azurerm_linux_virtual_machine" "airflow" {
     version   = "latest"
   }
 
-  custom_data = base64encode(file("${path.module}/cloud-init.yaml"))
+  # cloud-init template — Terraform injects secrets at apply time
+  custom_data = base64encode(templatefile("${path.module}/cloud-init.yaml", {
+    github_pat                = var.github_pat
+    airflow_admin_user        = var.airflow_admin_user
+    airflow_admin_password    = var.airflow_admin_password
+    neon_skill_demand_db_url  = var.neon_skill_demand_db_url
+    databricks_host           = azurerm_databricks_workspace.giljobi.workspace_url
+    databricks_token          = databricks_token.airflow.token_value
+    storage_connection_string = azurerm_storage_account.giljobi.primary_connection_string
+    git_branch                = "infra/azure-deployment"
+  }))
 
   tags = {
     project = "giljobi"
