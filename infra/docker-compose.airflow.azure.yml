@@ -1,0 +1,206 @@
+# =============================================================================
+# docker-compose.airflow.azure.yml
+# -----------------------------------------------------------------------------
+# Purpose : Apache Airflow for Azure cloud deployment (Databricks + Blob)
+# Base    : Same as docker-compose.airflow.yml with these differences:
+#   - build: Dockerfile.azure (Databricks provider instead of Livy)
+#   - GILJOBI_ENV=azure (DAG environment detection)
+#   - AIRFLOW_CONN_DATABRICKS_DEFAULT (Databricks workspace connection)
+#   - AZURE_STORAGE_CONNECTION_STRING (Blob Storage access)
+#   - No AIRFLOW_CONN_LIVY_SD (Livy not used in Azure mode)
+#   - No MANAGE_SPARK (Databricks manages its own clusters)
+#
+# Usage:
+#   ./up.sh airflow-azure
+#   (or manual: docker compose -f docker-compose.airflow.azure.yml up -d)
+#
+# Login: ${AIRFLOW_ADMIN_USER} / ${AIRFLOW_ADMIN_PASSWORD}
+# =============================================================================
+
+x-airflow-common: &airflow-common
+  build:
+    context: ./airflow
+    dockerfile: Dockerfile.azure
+  environment: &airflow-common-env
+    # ── Airflow Core ─────────────────────────────────────────
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-db/${AIRFLOW_DB_NAME}
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-db/${AIRFLOW_DB_NAME}
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW__WEBSERVER__WEB_SERVER_PORT: 8090
+    AIRFLOW__WEBSERVER__BASE_URL: http://localhost:8090
+    # ── Azure Environment Flag ───────────────────────────────
+    # DAGs use this to switch between local (Livy) and Azure (Databricks) mode
+    GILJOBI_ENV: azure
+    # ── Airflow Connections (Azure) ──────────────────────────
+    # Databricks workspace connection (auto-registered via env var)
+    # Format: databricks://<host>?token=<pat_token>
+    AIRFLOW_CONN_DATABRICKS_DEFAULT: ${AIRFLOW_CONN_DATABRICKS_DEFAULT}
+    # ── Azure Blob Storage ───────────────────────────────────
+    # Used by DAG check_blob_storage task to verify pipeline-data container
+    AZURE_STORAGE_CONNECTION_STRING: ${AZURE_STORAGE_CONNECTION_STRING:-}
+    # ── Pipeline DB (Neon — external, always available) ──────
+    SKILL_DEMAND_DB_CONN: ${SKILL_DEMAND_DB_CONN}
+    SKILL_DEMAND_DB_CONN_NEON: ${SKILL_DEMAND_DB_CONN_NEON:-}
+    PIPELINE_DB_CONN: ${PIPELINE_DB_CONN:-}
+    # ── Infrastructure Control ───────────────────────────────
+    # No MANAGE_SPARK — Databricks manages clusters automatically
+    MANAGE_PIPELINE_DB: "false"
+    MANAGE_SPARK: "false"
+    # Host path for Docker-in-Docker (still needed for potential debugging)
+    INFRA_HOST_PATH: ${INFRA_HOST_PATH}
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ../pipelines:/opt/airflow/pipelines
+    - ../data:/opt/airflow/data
+    - /var/run/docker.sock:/var/run/docker.sock
+    - .:/opt/airflow/infra
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    airflow-db:
+      condition: service_healthy
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Airflow Metadata DB
+  # ---------------------------------------------------------------------------
+  airflow-db:
+    image: postgres:17
+    container_name: airflow-db
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME}
+    expose:
+      - 5432
+    ports:
+      - "5433:5432"
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${AIRFLOW_DB_USER}"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # Redis
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:latest
+    container_name: giljobi-redis
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # Airflow Webserver
+  # ---------------------------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # Airflow Scheduler
+  # ---------------------------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # Airflow Worker
+  # ---------------------------------------------------------------------------
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      DUMB_INIT_SETSID: "0"
+    deploy:
+      replicas: ${AIRFLOW_WORKER_REPLICAS:-1}
+      resources:
+        limits:
+          memory: ${AIRFLOW_WORKER_MEMORY:-2g}
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # Airflow Init
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /sources/logs /sources/dags
+        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags}
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-giljobi}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-dgj1234}
+    user: "0:0"
+    volumes:
+      - ./:/sources
+
+networks:
+  default:
+    name: giljobi-network
+    external: true
+
+volumes:
+  airflow_db_data:
