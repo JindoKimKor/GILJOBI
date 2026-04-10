@@ -159,9 +159,14 @@ with DAG(
         print(f"  Container: pipeline-data")
         print(f"  Last modified: {props.last_modified}")
 
-        # List existing data
-        blobs = list(container.list_blobs(name_starts_with="processed/"))
-        print(f"  Existing processed files: {len(blobs)}")
+        # Quick check — count top-level folders only (avoid listing 10K+ checkpoints)
+        folders = set()
+        for blob in container.list_blobs(name_starts_with="processed/skill-demand/"):
+            folder = blob.name.split("/")[2] if len(blob.name.split("/")) > 2 else ""
+            folders.add(folder)
+            if len(folders) >= 10:
+                break
+        print(f"  Processed folders: {folders}")
 
     # =========================================================================
     # Ping DB Targets
@@ -201,13 +206,14 @@ with DAG(
 
     @task(task_id="az_check_databricks", task_display_name="Check Databricks")
     def check_databricks():
-        """Verify Databricks workspace is reachable."""
+        """Verify Databricks workspace is reachable via REST API."""
         from airflow.providers.databricks.hooks.databricks import DatabricksHook
         hook = DatabricksHook(databricks_conn_id=DATABRICKS_CONN_ID)
-        # List clusters to verify connectivity
-        clusters = hook.list_clusters()
+        # GET /api/2.0/clusters/list — verify workspace connectivity
+        response = hook._do_api_call(("GET", "api/2.0/clusters/list"), {})
+        clusters = response.get("clusters", [])
         print(f"[AZ:SD:INFRA] Databricks workspace connected.")
-        print(f"  Active clusters: {len(clusters.get('clusters', []))}")
+        print(f"  Active clusters: {len(clusters)}")
 
     # =========================================================================
     # NOC Setup

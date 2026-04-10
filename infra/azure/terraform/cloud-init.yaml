@@ -45,6 +45,12 @@ runcmd:
     SYSD
   - systemctl daemon-reload
 
+  # ── blobfuse2 install (must come before mount) ──────────────
+  - curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-archive-keyring.gpg
+  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-archive-keyring.gpg] https://packages.microsoft.com/repos/microsoft-ubuntu-$(lsb_release -cs)-prod $(lsb_release -cs) main" > /etc/apt/sources.list.d/microsoft.list
+  - apt-get update
+  - apt-get install -y blobfuse2
+
   # ── Clone repo (using GitHub PAT for private repo) ─────────
   - su - azureuser -c "git clone https://${github_pat}@github.com/JindoKimKor/GILJOBI.git /home/azureuser/giljobi"
   - su - azureuser -c "cd /home/azureuser/giljobi && git checkout ${git_branch}"
@@ -128,12 +134,6 @@ runcmd:
     GILJOBI_ENV=azure
     ENVEOF
   - chown azureuser:azureuser /home/azureuser/giljobi/infra/.env
-
-  # ── blobfuse2 (Azure Blob Storage mount) ───────────────────
-  - curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-archive-keyring.gpg
-  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-archive-keyring.gpg] https://packages.microsoft.com/repos/microsoft-ubuntu-$(lsb_release -cs)-prod $(lsb_release -cs) main" > /etc/apt/sources.list.d/microsoft.list
-  - apt-get update
-  - apt-get install -y blobfuse2
 
   # ── Auto-start Airflow (Azure mode) ────────────────────────
   - su - azureuser -c "cd /home/azureuser/giljobi/infra && chmod +x up-azure.sh && bash up-azure.sh --build"
