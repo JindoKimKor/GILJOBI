@@ -74,21 +74,22 @@ with DAG(
     tags=["skill-demand", "etl", "llm", "databricks", "azure"],
     default_args=default_args,
     params={
-        # LLM session control (Step 3)
-        "batch_delay_sec": Param(5, type="integer", description="Seconds between LLM batches"),
-        "max_batches_per_session": Param(800, type="integer", description="Max LLM calls before cooldown"),
-        "session_cooldown_min": Param(90, type="integer", description="Minutes to wait for session reset"),
-        "max_sessions": Param(0, type="integer", description="Max session cycles. 0 = all"),
-        # Step 2
+        # ── Databricks cluster config (shared by Step 2 + Step 3) ──
+        # Driver: DS2_v2 (2 vCPU, 7GB), Worker: DS1_v2 (1 vCPU, 3.5GB)
+        # Canada Central quota: 6 vCPU → driver(2) + workers(4×1) = 6 max
+        "driver_node_type": Param("Standard_DS2_v2", type="string", description="Driver VM type (2 vCPU, 7GB)"),
+        "worker_node_type": Param("Standard_DS1_v2", type="string", description="Worker VM type (1 vCPU, 3.5GB)"),
+        # ── Step 2: NOC Match (Sentence Transformers, memory-heavy) ──
         "step2_input_file": Param("", type="string", description="REQUIRED — e.g. step1_extracted.parquet (full) or step1_extracted_sample.parquet (test)"),
         "step2_noc_similarity_threshold": Param(0.65, type="number", description="Cosine similarity threshold"),
-        # Databricks cluster sizing — Step 2 (memory-heavy: model loading)
-        "step2_num_workers": Param(4, type="integer", description="Databricks workers for Step 2"),
-        "step2_executor_memory": Param("2g", type="string", description="Step 2 executor memory"),
+        "step2_num_workers": Param(4, type="integer", description="Databricks workers for Step 2 (max 4 at DS1_v2 to stay within 6 vCPU)"),
         "step2_partitions": Param(16, type="integer", description="Step 2 partition count"),
-        # Databricks cluster sizing — Step 3 (IO-heavy: LLM calls)
-        "step3_num_workers": Param(8, type="integer", description="Databricks workers for Step 3"),
-        "step3_executor_memory": Param("512m", type="string", description="Step 3 executor memory"),
+        # ── Step 3: LLM Enrich (IO-heavy, Claude CLI calls) ──
+        "step3_num_workers": Param(4, type="integer", description="Databricks workers for Step 3 (max 4 at DS1_v2 to stay within 6 vCPU)"),
+        "batch_delay_sec": Param(5, type="integer", description="Seconds between LLM batches"),
+        "max_batches_per_session": Param(800, type="integer", description="Max LLM calls before cooldown"),
+        "session_cooldown_min": Param(300, type="integer", description="Minutes to wait for session reset"),
+        "max_sessions": Param(0, type="integer", description="Max session cycles. 0 = all"),
     },
     doc_md="""
     ## Azure Skill Demand Pipeline (Databricks)
@@ -318,7 +319,7 @@ with DAG(
         print(f"[AZ:SD:STEP1:REVIEW]")
         print(f"  Rows: {len(df):,} extracted, {dropped:,} dropped → {len(cleaned):,} kept")
         print(f"[AZ:SD:STEP2:PREP]")
-        print(f"  Databricks workers: {params['step2_num_workers']}, Memory: {params['step2_executor_memory']}")
+        print(f"  Databricks workers: {params['step2_num_workers']}")
         print(f"  Partitions: {params['step2_partitions']}, Threshold: {params['step2_noc_similarity_threshold']}")
         print(f"  Input: {params['step2_input_file']}")
         return parquet_path
@@ -327,8 +328,6 @@ with DAG(
     # Step 2 — NOC Normalize (Databricks)
     # =========================================================================
 
-    # Driver: Standard_DS2_v2 (2 vCPU, 7GB) + Workers: Standard_DS1_v2 (1 vCPU, 3.5GB)
-    # Canada Central quota: 6 vCPU → driver(2) + workers(4×1) = 6 max
     # Note: executor_memory is NOT configurable on Databricks — node_type determines it
     step2_noc = DatabricksSubmitRunOperator(
         task_id="az_step2",
@@ -336,8 +335,8 @@ with DAG(
         databricks_conn_id=DATABRICKS_CONN_ID,
         new_cluster={
             "spark_version": "14.3.x-scala2.12",
-            "driver_node_type_id": "Standard_DS2_v2",
-            "node_type_id": "Standard_DS1_v2",
+            "driver_node_type_id": "{{ params.driver_node_type }}",
+            "node_type_id": "{{ params.worker_node_type }}",
             "num_workers": "{{ params.step2_num_workers }}",
         },
         spark_python_task={
@@ -375,21 +374,20 @@ Same Spark code as local — paths use wasbs:// (Blob Storage).
         print(f"  NOC matched: {stats['matched']:,} ({stats['match_rate']:.1%}), avg score: {stats['avg_score']:.3f}")
         print(f"  NOC unmatched: {stats['unmatched']:,} → LLM")
         print(f"[AZ:SD:STEP3:PREP]")
-        print(f"  Databricks workers: {params['step3_num_workers']}, Memory: {params['step3_executor_memory']}")
+        print(f"  Databricks workers: {params['step3_num_workers']}")
 
     # =========================================================================
     # Step 3 — LLM Enrich (Databricks)
     # =========================================================================
 
-    # Same cluster config as Step 2 — quota limit 6 vCPU
     step3_enrich = DatabricksSubmitRunOperator(
         task_id="az_step3",
         task_display_name="Step 3: LLM Enrich — Databricks",
         databricks_conn_id=DATABRICKS_CONN_ID,
         new_cluster={
             "spark_version": "14.3.x-scala2.12",
-            "driver_node_type_id": "Standard_DS2_v2",
-            "node_type_id": "Standard_DS1_v2",
+            "driver_node_type_id": "{{ params.driver_node_type }}",
+            "node_type_id": "{{ params.worker_node_type }}",
             "num_workers": "{{ params.step3_num_workers }}",
         },
         spark_python_task={
