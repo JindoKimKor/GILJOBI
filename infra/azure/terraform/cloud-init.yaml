@@ -1,0 +1,64 @@
+#cloud-config
+# =============================================================================
+# cloud-init.yaml — VM bootstrap (runs once on first boot)
+# =============================================================================
+# Installs Docker + Docker Compose, clones repo, sets up environment
+# =============================================================================
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - git
+  - jq
+
+runcmd:
+  # ── Docker CE ──────────────────────────────────────────────
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  - usermod -aG docker azureuser
+  # Airflow worker container needs docker.sock access for Docker-in-Docker
+  # (ensure_db, start_spark tasks). Default is 660 (root:docker) which blocks
+  # the airflow user inside the container. 666 allows all users to read/write.
+  - chmod 666 /var/run/docker.sock
+
+  # ── Docker socket persistence (survives Docker restart) ────
+  # chmod above only applies once. Docker daemon recreates docker.sock on
+  # every restart with default 660 permissions. This systemd override runs
+  # chmod automatically after every Docker start, so VM reboot is safe.
+  - mkdir -p /etc/systemd/system/docker.service.d
+  - |
+    cat > /etc/systemd/system/docker.service.d/override.conf << 'EOF'
+    [Service]
+    ExecStartPost=/bin/chmod 666 /var/run/docker.sock
+    EOF
+  - systemctl daemon-reload
+
+  # ── Clone repo ─────────────────────────────────────────────
+  - su - azureuser -c "git clone https://github.com/JindoKimKor/GILJOBI.git /home/azureuser/giljobi"
+
+  # ── Data directory permissions (Airflow container writes here) ──
+  - mkdir -p /home/azureuser/giljobi/data/raw/skill-demand /home/azureuser/giljobi/data/raw/market-trend /home/azureuser/giljobi/data/processed
+  - chmod -R 777 /home/azureuser/giljobi/data/
+
+  # ── blobfuse2 (Azure Blob Storage mount) ───────────────────
+  - curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-archive-keyring.gpg
+  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-archive-keyring.gpg] https://packages.microsoft.com/repos/microsoft-ubuntu-$(lsb_release -cs)-prod $(lsb_release -cs) main" > /etc/apt/sources.list.d/microsoft.list
+  - apt-get update
+  - apt-get install -y blobfuse2
+
+  # ── Auto-start Airflow on boot ──────────────────────────────
+  # Docker Compose containers have restart: unless-stopped, but they need
+  # to be started at least once. After first boot (cloud-init), subsequent
+  # VM stop/start will auto-restart containers via Docker's restart policy.
+  - su - azureuser -c "cd /home/azureuser/giljobi/infra && bash up.sh airflow"
+
+  # ── Done marker ────────────────────────────────────────────
+  - echo "cloud-init complete" > /home/azureuser/.cloud-init-done

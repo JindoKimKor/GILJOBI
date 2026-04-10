@@ -1,0 +1,14 @@
+# =============================================================================
+# terraform.tfvars.example — Copy to terraform.tfvars and fill in values
+# =============================================================================
+# cp terraform.tfvars.example terraform.tfvars
+# terraform.tfvars is gitignored
+# =============================================================================
+
+resource_group_name  = "giljobi-rg"
+location             = "eastus"
+vm_size              = "Standard_B4ms"
+admin_username       = "azureuser"
+ssh_public_key_path  = "~/.ssh/id_rsa.pub"
+admin_ip             = "*"                  # restrict to your IP: "x.x.x.x/32"
+storage_account_name = "giljobistorage"     # must be globally unique
