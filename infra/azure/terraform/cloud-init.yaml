@@ -91,9 +91,14 @@ runcmd:
       mode: key
       container: pipeline-data
     BLOBEOF
+  # Remove git-created data/ dir (blobfuse2 needs empty mount point)
+  # Git clone creates data/ with .gitkeep — must be empty for mount
+  - rm -rf /home/azureuser/giljobi/data/*
   - blobfuse2 mount /home/azureuser/giljobi/data --config-file=/home/azureuser/blobfuse2-config.yaml
-  # Create subdirectories on Blob (first access creates them)
-  - mkdir -p /home/azureuser/giljobi/data/raw/skill-demand /home/azureuser/giljobi/data/raw/market-trend /home/azureuser/giljobi/data/processed
+  # Create subdirectories on Blob — blobfuse2 only shows existing blobs,
+  # so we must create these dirs explicitly or Docker writes to container
+  # overlay instead of the Blob mount
+  - mkdir -p /home/azureuser/giljobi/data/raw/skill-demand /home/azureuser/giljobi/data/raw/market-trend /home/azureuser/giljobi/data/processed/skill-demand/step1 /home/azureuser/giljobi/data/processed/skill-demand/step2 /home/azureuser/giljobi/data/processed/skill-demand/step3/checkpoints
   - chmod -R 777 /home/azureuser/giljobi/data/
 
   # ── Persist blobfuse2 mount across VM reboots ──────────────
