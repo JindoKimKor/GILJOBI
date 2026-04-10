@@ -122,7 +122,7 @@ runcmd:
     AIRFLOW_ADMIN_USER=${airflow_admin_user}
     AIRFLOW_ADMIN_PASSWORD=${airflow_admin_password}
     AIRFLOW_WORKER_REPLICAS=1
-    AIRFLOW_WORKER_MEMORY=2g
+    AIRFLOW_WORKER_MEMORY=4g
 
     # Azure Databricks connection (auto-generated PAT)
     AIRFLOW_CONN_DATABRICKS_DEFAULT=databricks://${databricks_host}?token=${databricks_token}

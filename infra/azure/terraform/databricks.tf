@@ -6,9 +6,12 @@
 # Workspace provides: Spark runtime, DBFS, cluster management, UI
 # =============================================================================
 
+# Databricks in Canada Central — separate from VM (eastus) to avoid
+# vCPU quota conflict. Azure for Students eastus limit is 6 vCPU,
+# VM uses 4, leaving only 2. Canada Central has its own quota.
 resource "azurerm_databricks_workspace" "giljobi" {
   name                = "giljobi-databricks"
-  location            = azurerm_resource_group.giljobi.location
+  location            = "canadacentral"
   resource_group_name = azurerm_resource_group.giljobi.name
   sku                 = "standard"
 

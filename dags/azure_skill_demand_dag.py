@@ -80,7 +80,7 @@ with DAG(
         "session_cooldown_min": Param(90, type="integer", description="Minutes to wait for session reset"),
         "max_sessions": Param(0, type="integer", description="Max session cycles. 0 = all"),
         # Step 2
-        "step2_input_file": Param("", type="string", description="REQUIRED — Parquet filename in processed/step1/"),
+        "step2_input_file": Param("", type="string", description="REQUIRED — e.g. step1_extracted.parquet (full) or step1_extracted_sample.parquet (test)"),
         "step2_noc_similarity_threshold": Param(0.65, type="number", description="Cosine similarity threshold"),
         # Databricks cluster sizing — Step 2 (memory-heavy: model loading)
         "step2_num_workers": Param(4, type="integer", description="Databricks workers for Step 2"),
@@ -327,17 +327,18 @@ with DAG(
     # Step 2 — NOC Normalize (Databricks)
     # =========================================================================
 
+    # Driver: Standard_DS2_v2 (2 vCPU, 7GB) + Workers: Standard_DS1_v2 (1 vCPU, 3.5GB)
+    # Canada Central quota: 6 vCPU → driver(2) + workers(4×1) = 6 max
+    # Note: executor_memory is NOT configurable on Databricks — node_type determines it
     step2_noc = DatabricksSubmitRunOperator(
         task_id="az_step2",
         task_display_name="Step 2: NOC Match (ST) — Databricks",
         databricks_conn_id=DATABRICKS_CONN_ID,
         new_cluster={
             "spark_version": "14.3.x-scala2.12",
-            "node_type_id": "Standard_DS3_v2",
+            "driver_node_type_id": "Standard_DS2_v2",
+            "node_type_id": "Standard_DS1_v2",
             "num_workers": "{{ params.step2_num_workers }}",
-            "spark_conf": {
-                "spark.executor.memory": "{{ params.step2_executor_memory }}",
-            },
         },
         spark_python_task={
             "python_file": f"{DBFS_PIPELINE_DIR}/spark/step2_noc_spark.py",
@@ -380,17 +381,16 @@ Same Spark code as local — paths use wasbs:// (Blob Storage).
     # Step 3 — LLM Enrich (Databricks)
     # =========================================================================
 
+    # Same cluster config as Step 2 — quota limit 6 vCPU
     step3_enrich = DatabricksSubmitRunOperator(
         task_id="az_step3",
         task_display_name="Step 3: LLM Enrich — Databricks",
         databricks_conn_id=DATABRICKS_CONN_ID,
         new_cluster={
             "spark_version": "14.3.x-scala2.12",
-            "node_type_id": "Standard_DS3_v2",
+            "driver_node_type_id": "Standard_DS2_v2",
+            "node_type_id": "Standard_DS1_v2",
             "num_workers": "{{ params.step3_num_workers }}",
-            "spark_conf": {
-                "spark.executor.memory": "{{ params.step3_executor_memory }}",
-            },
         },
         spark_python_task={
             "python_file": f"{DBFS_PIPELINE_DIR}/spark/step3_enrich_spark.py",
