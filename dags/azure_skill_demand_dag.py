@@ -210,7 +210,7 @@ with DAG(
         from airflow.providers.databricks.hooks.databricks import DatabricksHook
         hook = DatabricksHook(databricks_conn_id=DATABRICKS_CONN_ID)
         # GET /api/2.0/clusters/list — verify workspace connectivity
-        response = hook._do_api_call(("GET", "api/2.0/clusters/list"), {})
+        response = hook._do_api_call(("GET", "2.0/clusters/list"), {})
         clusters = response.get("clusters", [])
         print(f"[AZ:SD:INFRA] Databricks workspace connected.")
         print(f"  Active clusters: {len(clusters)}")
