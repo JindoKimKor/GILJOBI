@@ -18,6 +18,15 @@ infra/logs/
 
 # Active environment config (symlink to config/.env.{environment})
 infra/.env
+infra/config/.env.development
+infra/config/.env.production
+
+# Terraform local state and credentials
+infra/azure/terraform/.terraform/
+infra/azure/terraform/terraform.tfstate
+infra/azure/terraform/terraform.tfstate.*
+infra/azure/terraform/tfplan
+infra/azure/terraform/terraform.tfvars
 
 
 # C extensions
