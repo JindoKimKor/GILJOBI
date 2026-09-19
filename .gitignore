@@ -18,6 +18,8 @@ infra/logs/
 
 # Active environment config (symlink to config/.env.{environment})
 infra/.env
+infra/config/.env.development
+infra/config/.env.production
 
 
 # C extensions
@@ -191,5 +193,6 @@ pyrightconfig.json
 infra/azure/terraform/.terraform/
 infra/azure/terraform/terraform.tfstate
 infra/azure/terraform/terraform.tfstate.backup
+infra/azure/terraform/terraform.tfstate.*
 infra/azure/terraform/tfplan
 infra/azure/terraform/terraform.tfvars

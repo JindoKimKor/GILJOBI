@@ -80,7 +80,7 @@ Giljobi-DataPipeline/
 ./infra/down.sh
 ```
 
-Configuration (replicas, memory, cores, credentials) is in `infra/config/.env.development`.
+Copy `infra/config/.env.example` to the ignored `infra/.env`, then supply local credentials and configuration there.
 
 ## Market Trend Pipeline
 

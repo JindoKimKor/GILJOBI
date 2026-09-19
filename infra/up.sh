@@ -3,7 +3,7 @@
 # up.sh — Start infrastructure modules
 # -----------------------------------------------------------------------------
 # Selects which modules to start. All configuration (replicas, memory, cores)
-# is read from .env, which is symlinked from config/.env.{environment}.
+# is read from the ignored .env file, created from the safe example template.
 #
 # Modules:
 #   postgres     — Pipeline data DB (market-trend)
@@ -24,12 +24,11 @@
 #
 # Configuration:
 #   All settings (replicas, memory, cores, credentials) are in config/:
-#     config/.env.development   — Local development defaults
-#     config/.env.production    — Production settings
-#     config/.env.example       — Template
+#     config/.env.example       — Safe committed template
+#     .env                      — Local credentials (ignored by Git)
 #
-#   Active config is symlinked to .env:
-#     ln -sf config/.env.development .env
+#   Create the active config and then supply local credentials:
+#     cp config/.env.example .env
 #
 #   Docker Compose reads .env automatically.
 # =============================================================================
@@ -40,12 +39,13 @@ cd "$(dirname "$0")"
 # =============================================================================
 # Config Check
 # -----------------------------------------------------------------------------
-# Ensure .env exists. If not, create symlink to development config.
+# Ensure .env exists. If not, copy the safe example template.
 # =============================================================================
 
 if [ ! -f .env ]; then
-    echo "No .env found — copying config/.env.development"
-    cp config/.env.development .env
+    echo "No .env found — copying config/.env.example"
+    cp config/.env.example .env
+    echo "Review .env and supply local credentials before deployment."
 fi
 
 # =============================================================================
@@ -74,9 +74,7 @@ show_usage() {
     echo "  --build      Rebuild images (use cached layers)"
     echo "  --no-cache   Rebuild images from scratch"
     echo ""
-    echo "Config: edit config/.env.{environment}, symlink to .env"
-    echo "  ln -sf config/.env.development .env"
-    echo "  ln -sf config/.env.production .env"
+    echo "Config: copy config/.env.example to .env, then supply local credentials"
     echo ""
     echo "Examples:"
     echo "  ./up.sh airflow                # Start Airflow (DAGs manage rest)"

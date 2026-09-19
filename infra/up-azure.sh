@@ -28,8 +28,9 @@ cd "$(dirname "$0")"
 # =============================================================================
 
 if [ ! -f .env ]; then
-    echo "No .env found — copying config/.env.development"
-    cp config/.env.development .env
+    echo "No .env found — copying config/.env.example"
+    cp config/.env.example .env
+    echo "Review .env and supply local credentials before deployment."
 fi
 
 # =============================================================================
